@@ -1,0 +1,7 @@
+# Live_Clipping — Python dependencies
+# The panel itself uses only the Python standard library.
+# yt-dlp is the only Python package needed (ffmpeg is a system binary).
+yt-dlp>=2024.1.1
+# numpy is optional but recommended — it makes moment detection faster.
+# If it is missing, the app falls back to ffmpeg astats.
+numpy>=1.26

@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live_Clipping — YouTube Live to Shorts</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">▶ LIVE<span>_CLIPPING</span></div>
+  <div class="tag">YouTube Live &rarr; Vertical Shorts &nbsp;·&nbsp; v1.2</div>
+  <div id="tools" class="tools">checking tools…</div>
+</header>
+
+<div class="rights">⚠️ Only clip streams you own or have permission for, or that are fair-use / transformative with source credit. Every clip keeps its source channel and link attached.</div>
+
+<main>
+  <section class="card">
+    <h2>1 · Source stream</h2>
+    <div class="row">
+      <input id="url" type="url" placeholder="Paste a YouTube live stream or video link…  e.g. https://www.youtube.com/watch?v=…" autocomplete="off">
+      <button id="fetchBtn" class="btn">Fetch</button>
+    </div>
+    <div id="meta" class="meta hidden">
+      <img id="metaThumb" alt="thumbnail">
+      <div>
+        <div id="metaTitle" class="meta-title"></div>
+        <div id="metaSub" class="meta-sub"></div>
+        <div id="metaStatus" class="meta-status"></div>
+      </div>
+    </div>
+    <div id="fetchError" class="error hidden"></div>
+
+    <h2>2 · Clip settings</h2>
+    <div class="settings">
+      <label>Clip length
+        <select id="length"><option value="30">30 sec</option><option value="45" selected>45 sec</option><option value="60">60 sec</option></select>
+      </label>
+      <label>Number of clips
+        <select id="clips"><option value="3">3</option><option value="5" selected>5</option><option value="10">10</option></select>
+      </label>
+      <label>Sensitivity
+        <select id="sensitivity"><option value="low">Low — only the loudest</option><option value="med" selected>Medium</option><option value="high">High — more moments</option></select>
+      </label>
+      <label>Live record time
+        <select id="recordMinutes"><option value="5">5 min</option><option value="10" selected>10 min</option><option value="30">30 min</option><option value="60">60 min</option></select>
+      </label>
+      <label>Quality
+        <select id="quality"><option value="max" selected>Max — best available (4K if it has it)</option><option value="4k">4K</option><option value="2k">2K (1440p)</option><option value="1080p">1080p</option></select>
+      </label>
+      <label>VOD time range
+        <select id="vodRange"><option value="auto" selected>Auto — first 1h if over 2h, else full</option><option value="full">Full video</option><option value="30min">First 30 min</option><option value="1h">First 1 hour</option><option value="2h">First 2 hours</option></select>
+      </label>
+    </div>
+    <div class="settings checks">
+      <label class="check"><input type="checkbox" id="freeSpace" checked> Free laptop space after Drive upload — delete the local clip once its Drive upload is verified (default ON)</label>
+      <label class="check"><input type="checkbox" id="deleteSource"> Delete the big source download after the job — only if every clip is safely in Drive (default OFF)</label>
+    </div>
+    <p class="hint">Live streams are captured live while they run (yt-dlp live download, ffmpeg 60s-segment capture as fallback), then analysed. Finished videos / VODs are downloaded at the quality and time range above — an 11-hour VOD is never downloaded in full by default. Moments are found from real audio energy — loud crowd / hype peaks — plus an optional subtitle keyword boost. Max quality keeps 4K as 2160×3840 vertical; a lower source is upscaled and labelled honestly as upscaled.</p>
+    <button id="processBtn" class="btn big">⚡ Process — find top moments &amp; cut Shorts</button>
+  </section>
+
+  <section class="card">
+    <h2>Progress <span id="liveIndicator" class="live-indicator idle"><span class="dot"></span><span id="liveLabel">Idle</span></span></h2>
+    <div class="progress"><div id="bar" class="bar" style="width:0%"></div></div>
+    <div id="stage" class="stage">Ready. Paste a YouTube link to start.</div>
+    <div id="dlWrap" class="dl-wrap hidden">
+      <div class="dl-text" id="dlText"></div>
+      <div class="progress dl"><div id="dlBar" class="bar" style="width:0%"></div></div>
+    </div>
+    <div id="liveCapture" class="live-capture hidden"></div>
+    <pre id="log" class="log"></pre>
+  </section>
+
+  <section class="card">
+    <h2>3 · Clips ready <span id="clipCount" class="count"></span></h2>
+    <div class="drive-note"><b>Drive flow — laptop cuts, Drive keeps:</b> each clip uploads in sequence to
+    <a href="https://drive.google.com/drive/folders/1MLzGI9qbzD2Ms8_305bByQgGfGe-If4b" target="_blank" rel="noopener">Drive → Live_Clipping / 07-cuts-sequence</a>
+    <span id="driveFolder"></span>, numbered 001, 002, 003… in cut order. Once an upload is verified the local copy is deleted (if “Free laptop space” is on), so the laptop stays light.
+    <br><b>Receive from Drive:</b> the next work — titles, thumbnails, posting — pulls the clips from Drive, not from the laptop. Needs rclone + the <code>gdrive</code> remote on this machine (<span id="rcloneState">checking…</span>).</div>
+    <div id="clips" class="clips"><p class="muted">No clips yet. Process a stream and they will appear here with previews.</p></div>
+  </section>
+</main>
+
+<footer>Live_Clipping v1.2 · localhost only · ffmpeg + yt-dlp + rclone · no paid APIs</footer>
+<script src="/app.js"></script>
+</body>
+</html>
