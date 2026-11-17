@@ -116,7 +116,12 @@ def cut_vertical(src: str, start: int, length: int, out_path: str, log=print,
 
     Framing: focus="gameplay" centres the crop on the action.
     focus="facecam" anchors the crop to `facecam_corner` so a facecam
-    in that corner stays in frame. nudge_x/nudge_y shift the crop
+    in that corner stays in frame. focus="face" (v1.3, the default)
+    sets the frame by what is actually in the shot — the main face
+    when one is found (OpenCV YuNet, see engine/face_framing.py),
+    otherwise the strongest motion (the action), otherwise the
+    centre. If nothing is found, or the detectors are unavailable,
+    it falls back to the centre crop. nudge_x/nudge_y shift the crop
     window in pixels (the panel's nudge controls).
     """
     global last_cut_info
@@ -135,6 +140,25 @@ def cut_vertical(src: str, start: int, length: int, out_path: str, log=print,
     factor = max(tw / max(1, src_w), th / max(1, src_h))
     scaled_w = int(src_w * factor + 0.5)
     scaled_h = int(src_h * factor + 0.5)
+    framing = None
+    if focus == "face":
+        # Smart framing: the crop follows the main face; when no face
+        # is found it follows the strongest motion (the action); when
+        # neither is usable it stays centred. Any failure falls back
+        # to the centre crop — the cut still succeeds.
+        try:
+            from .face_framing import (face_nudge_x, face_nudge_y,
+                                       frame_anchor)
+            framing = frame_anchor(src, start, length, log=log)
+            nudge_x = nudge_x + face_nudge_x(framing["anchor_x"], scaled_w, tw)
+            nudge_y = nudge_y + face_nudge_y(framing["anchor_y"], scaled_h, th)
+            log(f"Framing ({framing['source']}): anchor "
+                f"({framing['anchor_x']}, {framing['anchor_y']}) "
+                f"confidence {framing['confidence']} "
+                f"-> nudge=({nudge_x},{nudge_y}).")
+        except Exception as exc:  # noqa: BLE001
+            log(f"Framing unavailable ({exc}) — centre crop.")
+            framing = None
     if focus == "facecam":
         h_anchor, v_anchor = FACE_CAM_ANCHORS.get(facecam_corner, ("right", "top"))
     else:
@@ -159,6 +183,7 @@ def cut_vertical(src: str, start: int, length: int, out_path: str, log=print,
                      "target_height": th, "upscaled": bool(upscaled),
                      "upscaled_from": src_h if upscaled else None,
                      "focus": focus, "facecam_corner": facecam_corner,
+                     "framing": framing,
                      "crop_anchor": f"{h_anchor}/{v_anchor}",
                      "nudge_x": nudge_x, "nudge_y": nudge_y,
                      "crop_x": cx, "crop_y": cy}

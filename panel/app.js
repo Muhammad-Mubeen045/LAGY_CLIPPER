@@ -61,6 +61,7 @@ $("processBtn").onclick = async () => {
       sensitivity: $("sensitivity").value,
       record_minutes: +$("recordMinutes").value,
       quality: $("quality").value,
+      focus: $("focus").value,
       vod_range: $("vodRange").value,
       free_space: $("freeSpace").checked,
       delete_source: $("deleteSource").checked,
@@ -175,7 +176,7 @@ async function loadClips() {
     const otherType = type === "VIDEO" ? "SHORT" : "VIDEO";
     const framing = type === "SHORT" ? `
         <div class="framing">
-          <b>Framing</b> — focus: ${esc(c.focus || "gameplay")}${c.focus === "facecam" ? " (" + esc(c.facecam_corner || "") + ")" : ""} · nudge (${esc(c.nudge_x || 0)}, ${esc(c.nudge_y || 0)})
+          <b>Framing</b> — focus: ${esc(c.focus || "gameplay")}${c.focus === "facecam" ? " (" + esc(c.facecam_corner || "") + ")" : ""}${c.focus === "face" && c.framing ? " (" + esc(c.framing.source) + " " + esc(c.framing.anchor_x) + ", conf " + esc(c.framing.confidence) + ")" : ""} · nudge (${esc(c.nudge_x || 0)}, ${esc(c.nudge_y || 0)})
           <div class="clip-actions">
             <button class="btn ghost" onclick="reframeClip(${JSON.stringify(c.file)}, {nudge_dx:-100}, this)">← Left</button>
             <button class="btn ghost" onclick="reframeClip(${JSON.stringify(c.file)}, {nudge_dx:100}, this)">Right →</button>
@@ -184,6 +185,7 @@ async function loadClips() {
           </div>
           <div class="clip-actions">
             <button class="btn ghost" onclick="reframeClip(${JSON.stringify(c.file)}, {focus:'gameplay'}, this)">🎮 Gameplay focus (centre)</button>
+            <button class="btn ghost" onclick="reframeClip(${JSON.stringify(c.file)}, {focus:'face'}, this)">🙂 Face focus (auto-detect)</button>
             <button class="btn ghost" onclick="reframeClip(${JSON.stringify(c.file)}, {focus:'facecam', facecam_corner: document.getElementById('fc-${idx}').value}, this)">📷 Facecam focus</button>
             <select id="fc-${idx}"><option value="top-right">facecam top-right</option><option value="top-left">facecam top-left</option><option value="bottom-right">facecam bottom-right</option><option value="bottom-left">facecam bottom-left</option></select>
           </div>

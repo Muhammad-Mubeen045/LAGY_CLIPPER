@@ -15,4 +15,7 @@ previews/
 *.wav
 *.mp3
 *.jpg
+# YuNet face model — binary, downloaded by engine/download_model.py,
+# never committed (the GitHub snapshot push only carries text files).
+engine/models/*.onnx
 .muse-github-snapshot-sync.json

@@ -9,7 +9,7 @@
 <body>
 <header class="topbar">
   <div class="brand">▶ LIVE<span>_CLIPPING</span></div>
-  <div class="tag">YouTube Live &rarr; Vertical Shorts &nbsp;·&nbsp; v1.2</div>
+  <div class="tag">YouTube Live &rarr; Vertical Shorts &nbsp;·&nbsp; v1.3</div>
   <div id="tools" class="tools">checking tools…</div>
 </header>
 
@@ -49,6 +49,9 @@
       <label>Quality
         <select id="quality"><option value="max" selected>Max — best available (4K if it has it)</option><option value="4k">4K</option><option value="2k">2K (1440p)</option><option value="1080p">1080p</option></select>
       </label>
+      <label>Framing
+        <select id="focus"><option value="gameplay">🎮 Gameplay — centre crop</option><option value="face" selected>🙂 Face-centred — crop follows the main face, else the action (falls back to centre)</option></select>
+      </label>
       <label>VOD time range
         <select id="vodRange"><option value="auto" selected>Auto — first 1h if over 2h, else full</option><option value="full">Full video</option><option value="30min">First 30 min</option><option value="1h">First 1 hour</option><option value="2h">First 2 hours</option></select>
       </label>
@@ -83,7 +86,7 @@
   </section>
 </main>
 
-<footer>Live_Clipping v1.2 · localhost only · ffmpeg + yt-dlp + rclone · no paid APIs</footer>
+<footer>Live_Clipping v1.3 · localhost only · ffmpeg + yt-dlp + rclone · no paid APIs</footer>
 <script src="/app.js"></script>
 </body>
 </html>

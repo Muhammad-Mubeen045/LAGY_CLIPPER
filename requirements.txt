@@ -5,3 +5,9 @@ yt-dlp>=2024.1.1
 # numpy is optional but recommended — it makes moment detection faster.
 # If it is missing, the app falls back to ffmpeg astats.
 numpy>=1.26
+# opencv-python-headless is OPTIONAL — only for face-centred framing
+# (focus="face": the crop follows the main face instead of the frame
+# centre). Without it, face focus falls back to the centre crop.
+# Pin 4.10.0.84: version 5.x removed face detection entirely, and
+# 5.1.0 ships no CascadeClassifier and no haarcascade XMLs.
+opencv-python-headless==4.10.0.84

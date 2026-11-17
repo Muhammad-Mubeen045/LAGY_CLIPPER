@@ -39,7 +39,7 @@ from engine import fetch as fetch_mod     # noqa: E402
 from engine import moments as moments_mod  # noqa: E402
 from engine import titles as titles_mod   # noqa: E402
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 DEFAULT_PORT = 8899
 RIGHTS_NOTE = (
     "Only clip streams you own or have permission for, or that are "
@@ -235,7 +235,8 @@ def _upload_and_free(job: Job, out: str, rec: dict, free_space: bool) -> float:
 
 def run_job(job: Job, url: str, num_clips: int = 5, clip_length: int = 45,
             sensitivity: str = "med", record_minutes: int = 10,
-            quality: str = "max", vod_range: str = "auto",
+            quality: str = "max", focus: str = "face",
+            vod_range: str = "auto",
             free_space: bool = True, delete_source: bool = False) -> list[dict]:
     """Full pipeline. Returns the list of clip records created.
 
@@ -252,7 +253,7 @@ def run_job(job: Job, url: str, num_clips: int = 5, clip_length: int = 45,
             started_at=datetime.now().isoformat(), finished_at="",
             live_capture=None, drive_folder=None, download=None)
     job.log(f"=== Live_Clipping job started: {url} ===")
-    job.log(f"Settings: quality={quality}, vod_range={vod_range}, "
+    job.log(f"Settings: quality={quality}, focus={focus}, vod_range={vod_range}, "
             f"free_space_after_upload={free_space}, "
             f"delete_source_after_job={delete_source}")
     src = ""
@@ -331,7 +332,7 @@ def run_job(job: Job, url: str, num_clips: int = 5, clip_length: int = 45,
             fname = drive_mod.sequence_name(i, base_name)
             out = os.path.join(store.clips, fname)
             clip_mod.cut_vertical(src, m["start"], clip_length, out,
-                                  log=job.log, quality=quality)
+                                  log=job.log, quality=quality, focus=focus)
             cut_info = dict(clip_mod.last_cut_info)
             check = clip_mod.verify_clip(
                 out, clip_length,
@@ -375,8 +376,11 @@ def run_job(job: Job, url: str, num_clips: int = 5, clip_length: int = 45,
                 # manifest. It does NOT publish anything by itself.
                 "approved": False, "approved_at": "", "rejected": False,
                 "cut_type": cut_type, "reasons": reasons,
-                "focus": "gameplay", "facecam_corner": "top-right",
-                "nudge_x": 0, "nudge_y": 0, "preview": preview_name,
+                "focus": cut_info.get("focus", focus),
+                "facecam_corner": cut_info.get("facecam_corner", "top-right"),
+                "framing": cut_info.get("framing"),
+                "nudge_x": cut_info.get("nudge_x", 0),
+                "nudge_y": cut_info.get("nudge_y", 0), "preview": preview_name,
             }
             made.append(rec)
             job.log(f"Clip {i}: {fname} ({check['duration']}s, {check['size_mb']} MB, "
@@ -687,6 +691,7 @@ class Handler(BaseHTTPRequestHandler):
                     "sensitivity": str(body.get("sensitivity", "med")),
                     "record_minutes": int(body.get("record_minutes", 10)),
                     "quality": str(body.get("quality", "max")),
+                    "focus": str(body.get("focus", "face")),
                     "vod_range": str(body.get("vod_range", "auto")),
                     "free_space": bool(body.get("free_space", True)),
                     "delete_source": bool(body.get("delete_source", False)),
@@ -1096,6 +1101,11 @@ def main():
     ap.add_argument("--sensitivity", default="med", choices=["low", "med", "high"])
     ap.add_argument("--quality", default="max", choices=["max", "4k", "2k", "1080p"],
                     help="Max = best available (4K if the stream has it)")
+    ap.add_argument("--focus", default="face", choices=["gameplay", "face", "facecam"],
+                    help="Vertical framing: face = crop follows the main "
+                         "face, else the strongest motion, else centre "
+                         "(default); gameplay = centre crop; facecam = "
+                         "anchor to a corner (see --facecam-corner)")
     ap.add_argument("--vod-range", default="auto",
                     choices=["auto", "full", "30min", "1h", "2h"],
                     help="VOD time range. auto = first 1h for videos over 2h, else full")
@@ -1126,7 +1136,8 @@ def main():
     try:
         made = run_job(job, args.url, args.clips, args.length,
                        args.sensitivity, args.record_minutes,
-                       quality=args.quality, vod_range=args.vod_range,
+                       quality=args.quality, focus=args.focus,
+                       vod_range=args.vod_range,
                        free_space=not args.no_free_space,
                        delete_source=args.delete_source)
         print(f"\nDone: {len(made)} clips in {store.clips}")

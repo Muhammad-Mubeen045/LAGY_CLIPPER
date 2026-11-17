@@ -1,6 +1,6 @@
 # Live_Clipping — Test Report
 
-**Date:** 2026-11-17 (EST) · **Version:** 1.0.0 · **Tester:** Buzz (VM + laptop)
+**Date:** 2026-11-17 (EST) · **Version:** 1.0.0, v1.3 appended below · **Tester:** Buzz (VM + laptop)
 **Test source:** GTA 6 Trailer 2 — Rockstar Games,
 `https://www.youtube.com/watch?v=VQRLujxTm3c` (167 s, public VOD)
 
@@ -163,3 +163,49 @@ then from the laptop itself: `GET /` 200, `/api/status` → `done`, progress
 `Live_Clipping` — https://drive.google.com/drive/folders/1_ski57eGLoqe5y0Nv5UtB7Eu51PycoDS
 Subfolders present: `01-clips-ready`, `02-raw-moments`, `03-sources`,
 `04-titles-thumbnails`, `05-posted`, `06-app-builds`.
+
+## 9. v1.3 — face-centred framing (2026-11-17, appended)
+
+**Why:** the GTA 6 "Extended Look" combined clip (5x20s, 2K) framed
+faces out of the 9:16 crop — street shooter far-left, office speaker
+right-edge. Framing is now set by what is actually in the shot, and
+it is the **default for every video** (`focus="face"` in the panel,
+CLI, and `/api/process`).
+
+**Detector choice — PASS:** Haar cascades found faces in only 4 of 24
+test frames on GTA 6 footage (dark/profile/small faces defeat them).
+OpenCV **YuNet** (`FaceDetectorYN`, score 0.5) found faces in 14 of
+24. `opencv-python-headless` 5.x was rejected — it removed face
+detection entirely (no `CascadeClassifier`, no haarcascade XMLs).
+Pinned `==4.10.0.84`. Model `face_detection_yunet_2023mar.onnx`
+(232,589 bytes, md5 `4ae92eeb150c82ce15ac80738b3b8167`) is bundled in
+`engine/models/` on the laptop/VM and downloaded by
+`engine/download_model.py` (verified md5) for fresh clones — it is
+NOT committed (binary; the snapshot push only carries text files).
+
+**Anchor rule — PASS:** per sampled frame the face closest to the
+frame centre wins (not the largest — in one shot the largest face was
+Jason at the extreme left edge while the subject, Lucia, was at
+0.483); the segment anchor is the midpoint of the face's travel, so
+the fixed crop covers the movement. Real anchors from the Extended
+Look detection run: car/Jason @811s 0.538, office plan @1349s 0.631,
+street shootout @854s 0.202, street confrontation @290s 0.419.
+
+**Framing priority — PASS (synthetic + real video):**
+`frame_anchor` tries face, then motion, then centre. Motion fallback
+(`detect_motion_centre`, numpy, small grayscale frames, scene cuts
+skipped, uniform motion rejected) was tested on a generated video
+(white box oscillating on the left of a black frame): motion found at
+x=0.159, confidence 1.0; a static black video returned no motion and
+`frame_anchor` fell back to centre (0.5). A `cut_vertical`
+integration test on Trailer 2 (10s, 2K, `focus="face"`) found a face
+(anchor 0.528/0.307, confidence 0.6), cut 1440x2560, 10.0s, verified
+(size/audio OK), with the framing info recorded in `last_cut_info`.
+
+**Face-centred re-cut (Extended Look) — in progress at push time:**
+5 segments re-cut with per-segment face nudges (e.g. street
+shootout nudge -1356, office plan +596); segments 1-4 were cut and
+verified (20.0s each) when this report was written, segment 5 and
+the 100s re-combine + frame check + Drive upload follow after.
+Target folder: `07-cuts-sequence/2026-11-17_GTA6_Extended_Look_v2_FaceCentred/`.
+See the chat log for the final verify.
