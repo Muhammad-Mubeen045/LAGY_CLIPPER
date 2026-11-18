@@ -1,4 +1,4 @@
-# Live_Clipping 🎬 — v1.6.0
+# Live_Clipping 🎬 — v1.7.0
 
 Turn a YouTube live stream (or any public YouTube video) into vertical
 **Shorts-ready clips** — automatically finding the loudest, most hype
@@ -221,6 +221,25 @@ pyinstaller build_pyinstaller.spec
 - Clip audio is quiet → loudnorm is applied; check the source stream volume.
 - Panel shows old clips → clips are listed from `clips.json` in your data dir;
   delete from the panel to remove the file too.
+
+## v1.7 — Advanced progress details (2026-11-18)
+The panel showed only a progress bar, one status line and a log
+tail — the user asked for all the progress details to show. The
+Progress section now has:
+- **Stage pipeline** — Fetch → Record/Download → Audio → Moments →
+  Cutting + Upload → Done, with the current step highlighted and
+  finished steps checked, so the job's position is visible at a
+  glance.
+- **Job details line** — started at, live elapsed time, source
+  channel + title, quality, framing, clip count × length, record
+  minutes, Drive sequence folder, and finished time.
+- **Moments found** — the moments the job picked (rank, timestamp,
+  score, length, signals) appear as soon as they are found, before
+  the clips are cut, so the user sees what is coming.
+- **Live capture ETA** — the live line now also shows how much
+  recording time is left (record minutes minus elapsed).
+Backend: the job state now carries `settings` (stored when a job
+starts) and `moments` (stored right after moment detection).
 
 ## v1.6 — No-face framing: keep the streamer's face out (2026-11-18)
 For a live stream with a facecam, the user wants gameplay-only

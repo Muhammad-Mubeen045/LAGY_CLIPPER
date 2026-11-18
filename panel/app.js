@@ -345,6 +345,9 @@ async function poll() {
     $("stage").textContent = st.message || st.stage || "";
     $("log").textContent = (st.log_tail || []).join("\n");
     $("log").scrollTop = $("log").scrollHeight;
+    renderPipeline(st);
+    renderJobDetails(st);
+    renderMoments(st);
     // LIVE indicator — pulsing dot while a job runs.
     const ind = $("liveIndicator");
     const lbl = $("liveLabel");
@@ -383,7 +386,12 @@ async function poll() {
       el.classList.remove("hidden");
       const mins = Math.floor((lc.elapsed_seconds || 0) / 60);
       const secs = (lc.elapsed_seconds || 0) % 60;
-      el.textContent = `🔴 LIVE CAPTURE — ${lc.method || "capturing live now"} · elapsed ${mins}m ${secs}s · segments: ${lc.segments ?? 0} · moments so far: ${lc.moments_so_far ?? 0} · ${lc.status || "recording live now"}`;
+      // Recording ETA: the job records record_minutes, so show how
+      // much recording time is left (v1.7).
+      const recMin = st.settings && st.settings.record_minutes;
+      const remain = recMin ? Math.max(0, recMin * 60 - (lc.elapsed_seconds || 0)) : null;
+      const remainTxt = remain != null ? ` · ${Math.floor(remain / 60)}m ${remain % 60}s recording left` : "";
+      el.textContent = `🔴 LIVE CAPTURE — ${lc.method || "capturing live now"} · elapsed ${mins}m ${secs}s${remainTxt} · segments: ${lc.segments ?? 0} · moments so far: ${lc.moments_so_far ?? 0} · ${lc.status || "recording live now"}`;
     } else {
       $("liveCapture").classList.add("hidden");
     }
@@ -396,6 +404,73 @@ let lastClipLoad = 0;
 function loadClipsThrottled() {
   const now = Date.now();
   if (now - lastClipLoad > 5000) { lastClipLoad = now; loadClips(); }
+}
+
+// --- v1.7: progress details -------------------------------------------------
+// Stage pipeline: Fetch → Record/Download → Audio → Moments → Cutting → Done.
+// The backend stage is one of fetch/download/audio/moments/clipping/done/error.
+const PIPELINE_STEPS = [
+  ["fetch", "1 · Fetch"],
+  ["download", "2 · Record / Download"],
+  ["audio", "3 · Audio"],
+  ["moments", "4 · Moments"],
+  ["clipping", "5 · Cutting + Upload"],
+  ["done", "6 · Done"],
+];
+const PIPELINE_ORDER = PIPELINE_STEPS.map(s => s[0]);
+function renderPipeline(st) {
+  const el = $("pipeline");
+  if (!st.status || st.status === "idle" || !st.stage) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+  el.classList.remove("hidden");
+  const cur = st.stage === "error" ? "error" : st.stage;
+  const curIdx = PIPELINE_ORDER.indexOf(cur === "error" ? "done" : cur);
+  el.innerHTML = PIPELINE_STEPS.map(([key, label]) => {
+    const idx = PIPELINE_ORDER.indexOf(key);
+    let cls = "";
+    if (st.status === "error" && key === "done") cls = "failed";
+    else if (key === cur) cls = "now";
+    else if (curIdx >= 0 && idx < curIdx) cls = "done";
+    else if (st.status === "done") cls = "done";
+    const mark = cls === "done" ? "✓ " : cls === "failed" ? "✗ " : "";
+    return `<div class="step ${cls}">${mark}${esc(label)}</div>`;
+  }).join("");
+}
+// Job details: started at, elapsed time, source, and the job's settings.
+function fmtElapsed(startedAt) {
+  if (!startedAt) return "";
+  const s = Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000));
+  const m = Math.floor(s / 60), ss = s % 60;
+  return m > 0 ? `${m}m ${ss}s` : `${ss}s`;
+}
+function renderJobDetails(st) {
+  const el = $("jobDetails");
+  if (!st.status || st.status === "idle" || !st.started_at) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+  el.classList.remove("hidden");
+  const meta = st.meta || {};
+  const src = meta.title ? `${esc(meta.channel || "")} — ${esc(meta.title)}` : esc(st.url || "");
+  const s = st.settings || {};
+  const focusLabel = { face: "Face-centred", noface: "No face", gameplay: "Gameplay", facecam: "Facecam" }[s.focus] || s.focus || "";
+  const parts = [`Started <b>${esc(st.started_at.slice(11, 19))}</b>`, `elapsed <b>${fmtElapsed(st.started_at)}</b>`];
+  if (src) parts.push(src);
+  if (s.quality) parts.push(`<b>${esc(s.quality)}</b> quality`);
+  if (focusLabel) parts.push(focusLabel);
+  if (s.clip_length) parts.push(`<b>${s.num_clips || ""}×${s.clip_length}s</b>`);
+  if (s.record_minutes && st.live_capture) parts.push(`record <b>${s.record_minutes} min</b>`);
+  if (st.drive_folder) parts.push(`Drive: <b>${esc(st.drive_folder)}</b>`);
+  if (st.finished_at) parts.push(`finished <b>${esc(st.finished_at.slice(11, 19))}</b>`);
+  el.innerHTML = parts.join(" · ");
+}
+// Moments found: what the job picked, with score + signals, before the
+// clips are cut — so the user sees what is coming.
+function renderMoments(st) {
+  const el = $("momentsBox");
+  const moments = st.moments || [];
+  if (!moments.length) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+  el.classList.remove("hidden");
+  el.innerHTML = `<h3>🎯 Moments found (${moments.length}) — cutting now</h3>` + moments.map(m => {
+    const sigs = (m.signals || []).join(" · ");
+    return `<div class="moment">#${m.rank} · <b>${esc(m.timestamp || "")}</b> · <span class="score">${m.score}</span> · ${m.length}s <span class="sig">${esc(sigs)}</span></div>`;
+  }).join("");
 }
 setInterval(poll, 2000);
 setInterval(loadDrive, 10000);

@@ -55,7 +55,7 @@ def _safe_int(value, default: int) -> int:
         return default
 
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 DEFAULT_PORT = 8899
 RIGHTS_NOTE = (
     "Only clip streams you own or have permission for, or that are "
@@ -112,6 +112,11 @@ class Job:
             "started_at": "", "finished_at": "",
             "updated_at": 0.0, "download": None, "live_capture": None,
             "drive_folder": None,
+            # v1.7 — progress details the panel shows: the job's
+            # settings and the moments found (rank, time, score,
+            # signals), so the user sees what is coming before the
+            # clips are cut.
+            "settings": None, "moments": [],
         }
         self.log_lines: deque[str] = deque(maxlen=300)
         self._load_state()
@@ -267,7 +272,14 @@ def run_job(job: Job, url: str, num_clips: int = 5, clip_length: int = 60,
     job.set(status="running", stage="fetch", progress=2,
             message="Reading stream info…", url=url, meta=None, error="",
             started_at=datetime.now().isoformat(), finished_at="",
-            live_capture=None, drive_folder=None, download=None)
+            live_capture=None, drive_folder=None, download=None,
+            settings={"num_clips": num_clips, "clip_length": clip_length,
+                      "sensitivity": sensitivity,
+                      "record_minutes": record_minutes, "quality": quality,
+                      "focus": focus, "vod_range": vod_range,
+                      "free_space": free_space,
+                      "delete_source": delete_source},
+            moments=[])
     job.log(f"=== Live_Clipping job started: {url} ===")
     job.log(f"Settings: quality={quality}, focus={focus}, vod_range={vod_range}, "
             f"free_space_after_upload={free_space}, "
@@ -346,6 +358,14 @@ def run_job(job: Job, url: str, num_clips: int = 5, clip_length: int = 60,
             log=job.log)
         if not moments:
             raise RuntimeError("No moments found in this video.")
+        # v1.7 — publish the moments so the panel shows what was found
+        # (and what is about to be cut) before the clips exist.
+        job.set(moments=[{
+            "rank": m["rank"], "start": m["start"],
+            "timestamp": moments_mod.fmt_timestamp(m["start"]),
+            "score": m["score"], "length": _safe_int(m.get("length"), clip_length),
+            "signals": list(m.get("signals", [])),
+        } for m in moments])
 
         job.set(stage="clipping", progress=60, message="Cutting vertical Shorts…")
         date = datetime.now().strftime("%Y-%m-%d")

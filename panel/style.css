@@ -68,6 +68,19 @@ select { background:#050807; border:1px solid var(--line); color:var(--text); bo
 .stage { margin-top:10px; font-size:14px; color:var(--cyan); }
 .log { background:#050807; border:1px solid var(--line); border-radius:8px; padding:12px; height:170px; overflow:auto; font-size:12px; line-height:1.5; white-space:pre-wrap; }
 .review-bar { display:flex; gap:12px; flex-wrap:wrap; align-items:end; background:#050807; border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:12px; }
+.pipeline { display:flex; gap:6px; flex-wrap:wrap; margin:10px 0 4px; }
+.pipeline .step { flex:1 1 auto; min-width:86px; text-align:center; font-size:11px; padding:6px 4px; border:1px solid var(--line); border-radius:6px; color:var(--muted); background:#050807; }
+.pipeline .step.done { color:var(--green); border-color:var(--green); }
+.pipeline .step.now { color:#050807; background:var(--green); border-color:var(--green); font-weight:700; }
+.pipeline .step.failed { color:#fff; background:var(--red); border-color:var(--red); font-weight:700; }
+.job-details { font-size:12px; color:var(--muted); margin:6px 0; line-height:1.6; }
+.job-details b { color:var(--text); }
+.moments-box { margin:8px 0; border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:#050807; }
+.moments-box h3 { margin:0 0 6px; font-size:13px; color:var(--cyan); }
+.moments-box .moment { font-size:12px; color:var(--text); padding:3px 0; border-top:1px solid #122015; }
+.moments-box .moment:first-of-type { border-top:none; }
+.moments-box .moment .score { color:var(--amber); font-weight:700; }
+.moments-box .moment .sig { color:var(--muted); }
 .review-bar label { display:flex; flex-direction:column; gap:6px; font-size:12px; color:var(--muted); }
 .review-bar select { padding:8px; font-size:13px; }
 .review-counts { margin-left:auto; font-size:12px; color:var(--cyan); font-weight:700; }

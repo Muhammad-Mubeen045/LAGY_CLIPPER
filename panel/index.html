@@ -9,7 +9,7 @@
 <body>
 <header class="topbar">
   <div class="brand">▶ LIVE<span>_CLIPPING</span></div>
-  <div class="tag">YouTube Live &rarr; Vertical Shorts &nbsp;·&nbsp; v1.6.0</div>
+  <div class="tag">YouTube Live &rarr; Vertical Shorts &nbsp;·&nbsp; v1.7.0</div>
   <div id="tools" class="tools">checking tools…</div>
 </header>
 
@@ -68,6 +68,9 @@
     <h2>Progress <span id="liveIndicator" class="live-indicator idle"><span class="dot"></span><span id="liveLabel">Idle</span></span></h2>
     <div class="progress"><div id="bar" class="bar" style="width:0%"></div></div>
     <div id="stage" class="stage">Ready. Paste a YouTube link to start.</div>
+    <div id="pipeline" class="pipeline hidden"></div>
+    <div id="jobDetails" class="job-details hidden"></div>
+    <div id="momentsBox" class="moments-box hidden"></div>
     <div id="dlWrap" class="dl-wrap hidden">
       <div class="dl-text" id="dlText"></div>
       <div class="progress dl"><div id="dlBar" class="bar" style="width:0%"></div></div>
@@ -122,7 +125,7 @@
   </section>
 </main>
 
-<footer>Live_Clipping v1.6.0 · localhost only · ffmpeg + yt-dlp + rclone · no paid APIs</footer>
+<footer>Live_Clipping v1.7.0 · localhost only · ffmpeg + yt-dlp + rclone · no paid APIs</footer>
 <script src="/app.js"></script>
 </body>
 </html>
