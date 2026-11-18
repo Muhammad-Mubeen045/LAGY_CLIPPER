@@ -1,4 +1,4 @@
-# Live_Clipping 🎬 — v1.5.1
+# Live_Clipping 🎬 — v1.6.0
 
 Turn a YouTube live stream (or any public YouTube video) into vertical
 **Shorts-ready clips** — automatically finding the loudest, most hype
@@ -221,6 +221,24 @@ pyinstaller build_pyinstaller.spec
 - Clip audio is quiet → loudnorm is applied; check the source stream volume.
 - Panel shows old clips → clips are listed from `clips.json` in your data dir;
   delete from the panel to remove the file too.
+
+## v1.6 — No-face framing: keep the streamer's face out (2026-11-18)
+For a live stream with a facecam, the user wants gameplay-only
+clips — the streamer's face must not appear. New focus mode
+`noface` (panel select "No face — keep the streamer's face out"):
+`engine/face_framing.py` gains `frame_anchor_noface`, which detects
+the face (YuNet, now also returning `face_w`) and crops the
+OPPOSITE side of the frame — face on the right → crop the left
+side, face on the left → crop the right side — so the facecam
+corner stays outside the vertical crop. A face straddling the
+centre falls back to motion (the action), flagged
+`face_maybe_visible` so the reviewer checks that frame; no face at
+all falls back to motion, then centre. `engine/clip.py`
+`cut_vertical` honours it via the crop side (`left`/`right`) and
+records the framing (side, source, face_maybe_visible) in
+`last_cut_info`, so the panel record shows how the clip was framed.
+The default stays face-centred; noface is chosen per job (the
+Ducky GTA 6 live job runs with it).
 
 ## v1.5.1 — Bugfix: the int(None) crash (2026-11-18)
 The panel showed `int() argument must be a string, a bytes-like

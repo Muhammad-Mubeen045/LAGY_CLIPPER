@@ -55,7 +55,7 @@ def _safe_int(value, default: int) -> int:
         return default
 
 
-VERSION = "1.5.1"
+VERSION = "1.6.0"
 DEFAULT_PORT = 8899
 RIGHTS_NOTE = (
     "Only clip streams you own or have permission for, or that are "

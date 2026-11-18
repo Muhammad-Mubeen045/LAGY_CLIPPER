@@ -99,6 +99,7 @@ def detect_face_centre(video_path: str, start: float, length: float,
     n_samples = max(1, int(length // SAMPLE_EVERY_S))
     centres: list[float] = []
     centres_y: list[float] = []
+    widths: list[float] = []
     with tempfile.TemporaryDirectory(prefix="face_frame_") as tmp:
         for i in range(n_samples):
             t = start + 1.0 + i * SAMPLE_EVERY_S
@@ -123,6 +124,7 @@ def detect_face_centre(video_path: str, start: float, length: float,
             # serialise (and which would leak numpy types into records).
             centres.append(float((best[0] + best[2] / 2.0) / w))
             centres_y.append(float((best[1] + best[3] / 2.0) / h))
+            widths.append(float(best[2] / w))
     if not centres:
         log(f"No face found in {n_samples} sampled frames "
             f"@{start}s — falling back to centre crop.")
@@ -131,9 +133,11 @@ def detect_face_centre(video_path: str, start: float, length: float,
     median = centres_sorted[len(centres_sorted) // 2]
     median_y = sorted(centres_y)[len(centres_y) // 2]
     anchor = (min(centres) + max(centres)) / 2.0
+    median_w = sorted(widths)[len(widths) // 2] if widths else 0.0
     result = {
         "face_x": round(anchor, 3),
         "face_y": round(median_y, 3),
+        "face_w": round(median_w, 3),
         "median": round(median, 3),
         "confidence": round(len(centres) / n_samples, 2),
         "movement": round(max(centres) - min(centres), 3),
@@ -269,6 +273,73 @@ def frame_anchor(video_path: str, start: float, length: float,
     log(f"No face or usable motion @{start}s — centre crop.")
     return {"anchor_x": 0.5, "anchor_y": 0.5, "source": "centre",
             "confidence": 0.0, "detail": None}
+
+
+def frame_anchor_noface(video_path: str, start: float, length: float,
+                        log=print) -> dict:
+    """Pick the crop side that keeps the streamer's face OUT of frame.
+
+    For a gameplay clip where the facecam must not appear: detect the
+    face, then crop the OPPOSITE side of the frame. A 16:9 source's
+    vertical crop covers 9/16 (0.5625) of the width, so with a safety
+    margin:
+    - face's left edge past 0.60 -> crop the LEFT side (face excluded)
+    - face's right edge before 0.40 -> crop the RIGHT side (face excluded)
+    - face straddling the centre -> neither side fully excludes it;
+      fall back to motion (the action usually sits away from the
+      facecam) and flag it, so the reviewer can check that frame.
+    - no face found at all -> motion, then centre (nothing to exclude).
+
+    Returns {"side": "left" | "right" | None, "anchor_x": 0..1,
+    "anchor_y": 0..1, "source": "noface" | "motion" | "centre",
+    "confidence": 0..1, "face_maybe_visible": bool, "detail": ...}.
+    "side" is the crop side to use; None means centre crop.
+    """
+    face = detect_face_centre(video_path, start, length, log=log)
+    if face:
+        fx = face["face_x"]
+        fw = face.get("face_w", 0.15) or 0.15
+        half = fw / 2.0
+        left_edge = fx - half
+        right_edge = fx + half
+        if left_edge > 0.60:
+            log(f"No-face framing @{start}s: face at x={fx} "
+                f"(left edge {left_edge:.2f}) — cropping LEFT side, "
+                f"face stays out of frame.")
+            return {"side": "left", "anchor_x": 0.0, "anchor_y": 0.5,
+                    "source": "noface", "confidence": face["confidence"],
+                    "face_maybe_visible": False, "detail": face}
+        if right_edge < 0.40:
+            log(f"No-face framing @{start}s: face at x={fx} "
+                f"(right edge {right_edge:.2f}) — cropping RIGHT side, "
+                f"face stays out of frame.")
+            return {"side": "right", "anchor_x": 1.0, "anchor_y": 0.5,
+                    "source": "noface", "confidence": face["confidence"],
+                    "face_maybe_visible": False, "detail": face}
+        log(f"No-face framing @{start}s: face at x={fx} straddles the "
+            f"centre (edges {left_edge:.2f}–{right_edge:.2f}) — no side "
+            f"fully excludes it. Picking the side with less face "
+            f"overlap; check this clip's frame before approving.")
+        # Overlap of the face with each crop side (16:9 vertical crop
+        # covers 0.5625 of the width). Pick the side that shows less
+        # of the face.
+        left_overlap = max(0.0, min(right_edge, 0.5625) - max(left_edge, 0.0))
+        right_overlap = max(0.0, min(right_edge, 1.0) - max(left_edge, 0.4375))
+        side = "left" if left_overlap <= right_overlap else "right"
+        return {"side": side, "anchor_x": 0.0 if side == "left" else 1.0,
+                "anchor_y": 0.5, "source": "noface-partial",
+                "confidence": face["confidence"],
+                "face_maybe_visible": True, "detail": face}
+    motion = detect_motion_centre(video_path, start, length, log=log)
+    if motion:
+        return {"side": None, "anchor_x": motion["motion_x"],
+                "anchor_y": 0.5, "source": "motion",
+                "confidence": motion["confidence"],
+                "face_maybe_visible": False, "detail": motion}
+    log(f"No face or usable motion @{start}s — centre crop.")
+    return {"side": None, "anchor_x": 0.5, "anchor_y": 0.5,
+            "source": "centre", "confidence": 0.0,
+            "face_maybe_visible": False, "detail": None}
 
 
 def sample_face_presence(video_path: str, duration: float,

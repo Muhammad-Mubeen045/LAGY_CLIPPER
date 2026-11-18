@@ -141,7 +141,34 @@ def cut_vertical(src: str, start: int, length: int, out_path: str, log=print,
     scaled_w = int(src_w * factor + 0.5)
     scaled_h = int(src_h * factor + 0.5)
     framing = None
-    if focus == "face":
+    noface_side = None
+    if focus == "noface":
+        # Keep the streamer's face OUT of the clip: crop the side of
+        # the frame opposite the facecam. Falls back to the action
+        # (motion) when the face straddles the centre, and to centre
+        # when nothing is found. Any failure falls back to centre.
+        try:
+            from .face_framing import (face_nudge_x, face_nudge_y,
+                                       frame_anchor_noface)
+            framing = frame_anchor_noface(src, start, length, log=log)
+            noface_side = framing.get("side")
+            if noface_side in ("left", "right"):
+                log(f"Framing (noface): face excluded — cropping "
+                    f"{noface_side} side, confidence "
+                    f"{framing['confidence']}.")
+            elif framing["source"] == "motion":
+                nudge_x = nudge_x + face_nudge_x(framing["anchor_x"], scaled_w, tw)
+                log(f"Framing (noface → motion): anchor "
+                    f"({framing['anchor_x']}, {framing['anchor_y']}) "
+                    f"confidence {framing['confidence']} "
+                    f"-> nudge=({nudge_x},{nudge_y}) — face may be "
+                    f"partially visible, check the frame.")
+            else:
+                log("Framing (noface): no face/motion — centre crop.")
+        except Exception as exc:  # noqa: BLE001
+            log(f"No-face framing unavailable ({exc}) — centre crop.")
+            framing = None
+    elif focus == "face":
         # Smart framing: the crop follows the main face; when no face
         # is found it follows the strongest motion (the action); when
         # neither is usable it stays centred. Any failure falls back
@@ -161,6 +188,8 @@ def cut_vertical(src: str, start: int, length: int, out_path: str, log=print,
             framing = None
     if focus == "facecam":
         h_anchor, v_anchor = FACE_CAM_ANCHORS.get(facecam_corner, ("right", "top"))
+    elif focus == "noface" and noface_side in ("left", "right"):
+        h_anchor, v_anchor = noface_side, "center"
     else:
         h_anchor, v_anchor = "center", "center"
     cx, cy = _crop_window(scaled_w, scaled_h, tw, th,

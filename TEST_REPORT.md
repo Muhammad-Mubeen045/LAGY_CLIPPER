@@ -314,3 +314,27 @@ excluded (it raises a different `+` TypeError, not int(None)).
   `_safe_int("abc", 5)=5`. Panel restarted as v1.5.1 on 8899,
   md5-identical to VM, state reset to idle ("Ready. Paste a YouTube
   link to start.").
+
+## 14. v1.6 — No-face framing: keep the streamer's face out — PASS (2026-11-18)
+
+Built for the Ducky GTA 6 live stream (2026-11-18 06:12 EST): the
+user wants gameplay-only clips — the streamer's facecam must not
+appear. New focus mode `noface` (panel select "No face — keep the
+streamer's face out, gameplay only"): `frame_anchor_noface` detects
+the face (YuNet, now also returning `face_w`) and crops the
+OPPOSITE side — face on the right → crop the left side, face on
+the left → crop the right side. A face straddling the centre picks
+the side with less face overlap and is flagged `face_maybe_visible`.
+- Test `test_v16_noface.py` (VM, /tmp/cvtest, Trailer 2): **ALL
+  PASS**. At t=11s the face sat at x=0.561 (straddling centre,
+  edges 0.52–0.60) — the mode picked the left side (less overlap),
+  cropped at (0,0), and the output clip had **0 faces** while the
+  face-centred control cut at the same spot had 4. One bug found by
+  the test and fixed: `face_nudge_x` was only imported in the
+  `face` branch, so the `noface` motion fallback raised
+  "cannot access local variable 'face_nudge_x'" — now imported in
+  the noface branch too.
+- Live job: Ducky GTA 6 marathon stream (XuYm5c0Xfs4, 1920x1080,
+  live) — continuous loop (`live_loop.sh`): record 15 min live,
+  cut top 5 x 60s with noface, upload to Drive in sequence, repeat
+  while the stream is live. Cycle 1 started 06:22 EST.
