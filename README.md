@@ -1,4 +1,4 @@
-# Live_Clipping 🎬 — v1.5
+# Live_Clipping 🎬 — v1.5.1
 
 Turn a YouTube live stream (or any public YouTube video) into vertical
 **Shorts-ready clips** — automatically finding the loudest, most hype
@@ -221,6 +221,22 @@ pyinstaller build_pyinstaller.spec
 - Clip audio is quiet → loudnorm is applied; check the source stream volume.
 - Panel shows old clips → clips are listed from `clips.json` in your data dir;
   delete from the panel to remove the file too.
+
+## v1.5.1 — Bugfix: the int(None) crash (2026-11-18)
+The panel showed `int() argument must be a string, a bytes-like
+object or a real number, not 'NoneType'` when the user clicked
+Process. Cause: a request body carrying a null for `length` (JSON
+turns a JS NaN into null) hit `int(body.get("length", 60))` — the
+default only applies when the key is missing, not when it is null.
+Fixes: a `_safe_int(value, default)` helper that never raises on
+None/bad input, used for `clips`/`length`/`record_minutes`, the cut
+loop's moment length, and trim start/end; the frontend now sends
+`+value || default` so it never sends NaN; reframe/recut nudge math
+uses `(rec.get("nudge_x") or 0)` because three old records carry
+`nudge_x`/`nudge_y` as explicit None (and `.get(key, 0)` returns
+None for a present key). Server errors now log the full traceback
+(the old handler swallowed it, so the crash was undiagnosable from
+the log alone).
 
 ## v1.5 — Review & Filter: keep or drop, before you post (2026-11-18)
 The panel had approve/reject/delete buttons buried inside each

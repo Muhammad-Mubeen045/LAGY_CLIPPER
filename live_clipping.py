@@ -39,7 +39,23 @@ from engine import fetch as fetch_mod     # noqa: E402
 from engine import moments as moments_mod  # noqa: E402
 from engine import titles as titles_mod   # noqa: E402
 
-VERSION = "1.5.0"
+def _safe_int(value, default: int) -> int:
+    """int() that never raises on None / bad input — returns `default`.
+
+    The panel once crashed with "int() argument must be ... not
+    'NoneType'" when a request body carried a null (JSON turns a JS
+    NaN into null). A bad number must fall back to the default, never
+    take the panel down.
+    """
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+VERSION = "1.5.1"
 DEFAULT_PORT = 8899
 RIGHTS_NOTE = (
     "Only clip streams you own or have permission for, or that are "
@@ -348,7 +364,7 @@ def run_job(job: Job, url: str, num_clips: int = 5, clip_length: int = 60,
             out = os.path.join(store.clips, fname)
             # Story-complete length: the moment window may be longer
             # or shorter than clip_length (shot/dialogue aligned).
-            m_len = int(m.get("length", clip_length))
+            m_len = _safe_int(m.get("length"), clip_length)
             clip_mod.cut_vertical(src, m["start"], m_len, out,
                                   log=job.log, quality=quality, focus=focus)
             cut_info = dict(clip_mod.last_cut_info)
@@ -648,6 +664,7 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass  # client closed the connection early (e.g. video seek) — not an error
         except Exception as exc:  # noqa: BLE001
+            traceback.print_exc()
             try:
                 self._send_json({"error": str(exc)}, status=500)
             except (BrokenPipeError, ConnectionResetError):
@@ -704,10 +721,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json({"ok": False, "error": "A job is already running. Wait for it to finish."})
                     return
                 args = {
-                    "num_clips": int(body.get("clips", 5)),
-                    "clip_length": int(body.get("length", 60)),
+                    "num_clips": _safe_int(body.get("clips"), 5),
+                    "clip_length": _safe_int(body.get("length"), 60),
                     "sensitivity": str(body.get("sensitivity", "med")),
-                    "record_minutes": int(body.get("record_minutes", 10)),
+                    "record_minutes": _safe_int(body.get("record_minutes"), 10),
                     "quality": str(body.get("quality", "max")),
                     "focus": str(body.get("focus", "face")),
                     "vod_range": str(body.get("vod_range", "auto")),
@@ -746,6 +763,11 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_error(404, "Not found")
         except Exception as exc:  # noqa: BLE001
+            # Log the full traceback (the panel used to swallow it and
+            # only show the one-line error in the browser — the 2026-11-18
+            # int(None) crash was undiagnosable from the log alone).
+            traceback.print_exc()
+            self.job.log(f"API error on {path}: {exc!r}")
             self._send_json({"ok": False, "error": str(exc)}, status=500)
 
     def _run_bg(self, url, args):
@@ -864,12 +886,8 @@ class Handler(BaseHTTPRequestHandler):
         new_start = body.get("start")
         new_end = body.get("end")
         if new_start is not None and new_end is not None:
-            try:
-                new_start = int(new_start)
-                new_end = int(new_end)
-            except (TypeError, ValueError):
-                self._send_json({"ok": False, "error": "Start/end must be seconds (numbers)."})
-                return
+            new_start = _safe_int(new_start, rec.get("start", 0))
+            new_end = _safe_int(new_end, rec.get("end", 0))
             new_len = new_end - new_start
             if new_start < 0 or new_len < 5 or new_len > 60:
                 self._send_json({"ok": False, "error": "Trim must be 5–60 seconds long, start >= 0."})
@@ -978,8 +996,8 @@ class Handler(BaseHTTPRequestHandler):
                     focus=focus if focus is not None else rec.get("focus", "gameplay"),
                     facecam_corner=(facecam_corner if facecam_corner is not None
                                     else rec.get("facecam_corner", "top-right")),
-                    nudge_x=nudge_x if nudge_x is not None else rec.get("nudge_x", 0),
-                    nudge_y=nudge_y if nudge_y is not None else rec.get("nudge_y", 0))
+                    nudge_x=nudge_x if nudge_x is not None else (rec.get("nudge_x") or 0),
+                    nudge_y=nudge_y if nudge_y is not None else (rec.get("nudge_y") or 0))
             cut_info = dict(clip_mod.last_cut_info)
             check = clip_mod.verify_clip(
                 tmp, length,
@@ -1067,12 +1085,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         focus = body.get("focus") or rec.get("focus", "gameplay")
         corner = body.get("facecam_corner") or rec.get("facecam_corner", "top-right")
-        nudge_x = rec.get("nudge_x", 0) + int(body.get("nudge_dx", 0) or 0)
-        nudge_y = rec.get("nudge_y", 0) + int(body.get("nudge_dy", 0) or 0)
+        # `or 0` (not .get(key, 0)): old records carry nudge_x/nudge_y
+        # as explicit None, and .get returns None for a present key —
+        # None + int() then crashes the panel (2026-11-18).
+        nudge_x = (rec.get("nudge_x") or 0) + _safe_int(body.get("nudge_dx"), 0)
+        nudge_y = (rec.get("nudge_y") or 0) + _safe_int(body.get("nudge_dy"), 0)
         if body.get("nudge_x") is not None:
-            nudge_x = int(body["nudge_x"])
+            nudge_x = _safe_int(body.get("nudge_x"), nudge_x)
         if body.get("nudge_y") is not None:
-            nudge_y = int(body["nudge_y"])
+            nudge_y = _safe_int(body.get("nudge_y"), nudge_y)
         ok, err = self._recut_record(rec, "SHORT", focus=focus,
                                      facecam_corner=corner,
                                      nudge_x=nudge_x, nudge_y=nudge_y)

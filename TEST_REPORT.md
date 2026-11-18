@@ -287,3 +287,30 @@ every job mixed together, no way to see what still needed a decision.
   exact file). Reject stays soft — marked not-worthy, stays in Drive.
   Bulk actions go through one new /api/clips/bulk endpoint with
   per-file results. Nothing is posted from the panel.
+
+## 13. v1.5.1 — Bugfix: the int(None) crash — PASS (2026-11-18)
+
+The panel showed `int() argument must be a string, a bytes-like
+object or a real number, not 'NoneType'` when the user clicked
+Process (screenshot 04:41 EST). Reproduced on the laptop: POST
+/api/process with `{"length": null, ...}` returned exactly that
+error — a null in the body (JSON turns a JS NaN into null) hit
+`int(body.get("length", 60))`, whose default only applies when the
+key is missing, not when it is null. The reframe nudge math was
+excluded (it raises a different `+` TypeError, not int(None)).
+- Fix: `_safe_int(value, default)` (never raises on None/bad input)
+  for clips/length/record_minutes, the cut loop, and trim start/end;
+  frontend sends `+value || default` so it never sends NaN; reframe
+  and recut nudge math use `(rec.get("nudge_x") or 0)` — three old
+  records carried nudge_x/nudge_y as explicit None, and `.get(key, 0)`
+  returns None for a present key. Those 6 fields were normalized to
+  0 in clips.json. Server errors now log the full traceback (the old
+  handler swallowed it, so the crash was undiagnosable from the log).
+- Live test on the laptop: POST /api/process with null
+  length/clips/record_minutes now returns `{"ok": true, "Job
+  started."}` (then fails honestly on the fake URL, "not a YouTube
+  link", no crash); reframe math on a None-nudge record gives the
+  correct nudge (-100, 50); `_safe_int(None, 60)=60`,
+  `_safe_int("abc", 5)=5`. Panel restarted as v1.5.1 on 8899,
+  md5-identical to VM, state reset to idle ("Ready. Paste a YouTube
+  link to start.").

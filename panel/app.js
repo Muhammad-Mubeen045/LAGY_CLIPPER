@@ -56,10 +56,13 @@ $("processBtn").onclick = async () => {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       url,
-      length: +$("length").value,
-      clips: +$("clips").value,
+      // Never send NaN: JSON turns NaN into null, and the server's
+      // int(null) crashed the panel (2026-11-18). `|| default` turns
+      // a bad value into the default instead.
+      length: +$("length").value || 60,
+      clips: +$("clips").value || 5,
       sensitivity: $("sensitivity").value,
-      record_minutes: +$("recordMinutes").value,
+      record_minutes: +$("recordMinutes").value || 10,
       quality: $("quality").value,
       focus: $("focus").value,
       vod_range: $("vodRange").value,
