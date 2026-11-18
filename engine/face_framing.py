@@ -269,3 +269,54 @@ def frame_anchor(video_path: str, start: float, length: float,
     log(f"No face or usable motion @{start}s — centre crop.")
     return {"anchor_x": 0.5, "anchor_y": 0.5, "source": "centre",
             "confidence": 0.0, "detail": None}
+
+
+def sample_face_presence(video_path: str, duration: float,
+                         every_s: float = 5.0, log=print) -> list[dict]:
+    """Sample frames across the whole video and record face presence.
+
+    One frame every `every_s` seconds (default 5 s). Each sample is
+    {"t": seconds, "faces": count, "max_w": largest face width as a
+    fraction of the frame width, "max_area": largest face area as a
+    fraction of the frame}. A big sustained face (a close-up, a
+    romantic or kiss scene) is exactly the quiet moment audio-only
+    detection misses, so moment finding uses these samples as a
+    visual signal. Returns [] when OpenCV/model is missing — the
+    caller falls back to audio-only moments.
+    """
+    cv2 = _cv2()
+    if cv2 is None or not hasattr(cv2, "FaceDetectorYN_create"):
+        return []
+    model = model_path()
+    if model is None:
+        return []
+    samples: list[dict] = []
+    n = max(1, int(duration // every_s))
+    with tempfile.TemporaryDirectory(prefix="face_sample_") as tmp:
+        for i in range(n):
+            t = 1.0 + i * every_s
+            if t >= duration:
+                break
+            jpg = os.path.join(tmp, f"s{i}.jpg")
+            if not _grab_frame(video_path, t, jpg):
+                continue
+            img = cv2.imread(jpg)
+            if img is None:
+                continue
+            h, w = img.shape[:2]
+            detector = cv2.FaceDetectorYN_create(
+                model, "", (w, h),
+                YUNET_SCORE_THRESHOLD, YUNET_NMS_THRESHOLD, 5000)
+            _, faces = detector.detect(img)
+            if faces is None or len(faces) == 0:
+                samples.append({"t": round(t, 1), "faces": 0,
+                                "max_w": 0.0, "max_area": 0.0})
+                continue
+            widths = [float(f[2]) / w for f in faces]
+            areas = [float(f[2] * f[3]) / (w * h) for f in faces]
+            samples.append({"t": round(t, 1), "faces": len(faces),
+                            "max_w": round(max(widths), 3),
+                            "max_area": round(max(areas), 3)})
+    found = sum(1 for s in samples if s["faces"] > 0)
+    log(f"Face sampling: {found}/{len(samples)} sampled frames have a face.")
+    return samples

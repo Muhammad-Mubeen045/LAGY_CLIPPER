@@ -9,7 +9,7 @@ Usage — panel (recommended):
     python3 live_clipping.py --serve --port 8899 --data-dir ~/YT
 
 Usage — CLI:
-    python3 live_clipping.py --url <youtube-link> --clips 5 --length 45
+    python3 live_clipping.py --url <youtube-link> --clips 5 --length 60
     python3 live_clipping.py --url <live-link> --record-minutes 10
 
 RIGHTS NOTE: only clip streams you own or have permission for, or that
@@ -39,7 +39,7 @@ from engine import fetch as fetch_mod     # noqa: E402
 from engine import moments as moments_mod  # noqa: E402
 from engine import titles as titles_mod   # noqa: E402
 
-VERSION = "1.3.0"
+VERSION = "1.5.0"
 DEFAULT_PORT = 8899
 RIGHTS_NOTE = (
     "Only clip streams you own or have permission for, or that are "
@@ -233,7 +233,7 @@ def _upload_and_free(job: Job, out: str, rec: dict, free_space: bool) -> float:
         return 0.0
 
 
-def run_job(job: Job, url: str, num_clips: int = 5, clip_length: int = 45,
+def run_job(job: Job, url: str, num_clips: int = 5, clip_length: int = 60,
             sensitivity: str = "med", record_minutes: int = 10,
             quality: str = "max", focus: str = "face",
             vod_range: str = "auto",
@@ -305,14 +305,29 @@ def run_job(job: Job, url: str, num_clips: int = 5, clip_length: int = 45,
         wav = os.path.join(store.raw, f"{meta['id'] or 'video'}_audio.wav")
         moments_mod.extract_audio(src, wav, log=job.log)
 
-        job.set(stage="moments", progress=50, message="Finding the loudest moments…")
+        job.set(stage="moments", progress=50,
+                message="Finding the best moments (audio + faces + shots)…")
         energies = moments_mod.compute_energies(wav, log=job.log)
         duration = clip_mod.video_duration(src) or len(energies)
         vtt = fetch_mod.fetch_subtitles(meta, store.downloads, log=job.log)
         sub_hits = moments_mod.parse_subtitle_keywords(vtt)
+        sub_segments = moments_mod.parse_subtitle_segments(vtt)
+        # Visual signals (v1.4): shot boundaries are a fast ffmpeg
+        # pass; face sampling needs OpenCV + the YuNet model and
+        # returns [] without them (audio-only moments, as before).
+        shot_changes = moments_mod.detect_shot_changes(src, log=job.log)
+        face_samples: list[dict] = []
+        try:
+            from engine import face_framing as face_mod
+            face_samples = face_mod.sample_face_presence(
+                src, duration, log=job.log)
+        except Exception as exc:  # noqa: BLE001
+            job.log(f"Face sampling skipped ({exc}) — audio + shots only.")
         moments = moments_mod.find_moments(
             energies, duration, clip_length, num_clips, sensitivity,
-            subtitle_hits=sub_hits, log=job.log)
+            subtitle_hits=sub_hits, shot_changes=shot_changes,
+            face_samples=face_samples, subtitle_segments=sub_segments,
+            log=job.log)
         if not moments:
             raise RuntimeError("No moments found in this video.")
 
@@ -331,11 +346,14 @@ def run_job(job: Job, url: str, num_clips: int = 5, clip_length: int = 45,
             base_name = f"{date}_{chan}_moment{m['rank']:02d}_{m['start']//60:02d}-{m['start']%60:02d}.mp4"
             fname = drive_mod.sequence_name(i, base_name)
             out = os.path.join(store.clips, fname)
-            clip_mod.cut_vertical(src, m["start"], clip_length, out,
+            # Story-complete length: the moment window may be longer
+            # or shorter than clip_length (shot/dialogue aligned).
+            m_len = int(m.get("length", clip_length))
+            clip_mod.cut_vertical(src, m["start"], m_len, out,
                                   log=job.log, quality=quality, focus=focus)
             cut_info = dict(clip_mod.last_cut_info)
             check = clip_mod.verify_clip(
-                out, clip_length,
+                out, m_len,
                 target=(cut_info["target_width"], cut_info["target_height"]))
             if not check["size_ok"] or not check["audio_ok"]:
                 job.log(f"WARNING: clip {fname} failed verification: {check}")
@@ -343,7 +361,7 @@ def run_job(job: Job, url: str, num_clips: int = 5, clip_length: int = 45,
             preview_name = ""
             try:
                 preview_name = fname + ".jpg"
-                clip_mod.extract_preview(src, m["start"] + clip_length // 2,
+                clip_mod.extract_preview(src, m["start"] + m_len // 2,
                                          os.path.join(store.previews, preview_name),
                                          log=job.log)
             except Exception as exc:  # noqa: BLE001
@@ -363,7 +381,7 @@ def run_job(job: Job, url: str, num_clips: int = 5, clip_length: int = 45,
                 "channel": meta["channel"], "source_url": meta["webpage_url"],
                 "start": m["start"], "end": m["end"], "timestamp": m["timestamp"],
                 "score": m["score"], "keywords": m.get("keywords", []),
-                "length": clip_length, "posted": False,
+                "length": m_len, "posted": False,
                 "created_at": datetime.now().isoformat(),
                 "size_mb": check["size_mb"], "duration": check["duration"],
                 "verified": check,
@@ -687,7 +705,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 args = {
                     "num_clips": int(body.get("clips", 5)),
-                    "clip_length": int(body.get("length", 45)),
+                    "clip_length": int(body.get("length", 60)),
                     "sensitivity": str(body.get("sensitivity", "med")),
                     "record_minutes": int(body.get("record_minutes", 10)),
                     "quality": str(body.get("quality", "max")),
@@ -699,6 +717,8 @@ class Handler(BaseHTTPRequestHandler):
                 t = threading.Thread(target=self._run_bg, args=(url, args), daemon=True)
                 t.start()
                 self._send_json({"ok": True, "message": "Job started."})
+            elif path == "/api/clips/bulk":
+                self._bulk_clips(self._read_json())
             elif path.startswith("/api/clips/") and path.endswith("/posted"):
                 name = unquote(path.split("/")[3])
                 self._mark_posted(name)
@@ -1067,14 +1087,73 @@ class Handler(BaseHTTPRequestHandler):
 
     def _delete_clip(self, name: str):
         safe = os.path.basename(name)
-        clips = [c for c in self.store.load_clips() if c.get("file") != safe]
+        clips = self.store.load_clips()
+        rec = next((c for c in clips if c.get("file") == safe), None)
+        stream_folder = (rec or {}).get("stream_folder") or ""
+        # Delete the Drive copy FIRST, so a failed Drive delete is
+        # reported instead of silently leaving the clip in Drive.
+        drive_ok, drive_msg = drive_mod.delete_from_drive(
+            stream_folder, safe, log=self.job.log)
+        clips = [c for c in clips if c.get("file") != safe]
         self.store.save_clips(clips)
         for folder in (self.store.clips, self.store.posted):
             p = os.path.join(folder, safe)
             if os.path.exists(p):
                 os.remove(p)
-        self.job.log(f"Deleted clip: {safe}")
-        self._send_json({"ok": True})
+        self.job.log(f"Deleted clip: {safe} (Drive: {drive_msg})")
+        self._save_manifest_for(stream_folder)
+        self._send_json({"ok": True, "drive_deleted": drive_ok,
+                         "drive_message": drive_msg})
+
+    def _bulk_clips(self, body: dict):
+        """Bulk review action: approve / reject / delete many clips.
+
+        Body: {"action": "approve"|"reject"|"delete", "files": [names]}.
+        Returns per-file results so the panel can show what worked.
+        Delete uses the same path as single delete (Drive copy too).
+        """
+        action = body.get("action")
+        files = body.get("files") or []
+        if action not in ("approve", "reject", "delete"):
+            self._send_json({"ok": False, "error": "Unknown bulk action."})
+            return
+        if not isinstance(files, list) or not files:
+            self._send_json({"ok": False, "error": "No clips given."})
+            return
+        results: list[dict] = []
+        clips = self.store.load_clips()
+        for name in files:
+            safe = os.path.basename(str(name))
+            rec = next((c for c in clips if c.get("file") == safe), None)
+            if not rec:
+                results.append({"file": safe, "ok": False,
+                                "error": "Clip not found."})
+                continue
+            if action == "approve":
+                rec["approved"] = True
+                rec["approved_at"] = datetime.now().isoformat()
+                rec["rejected"] = False
+                results.append({"file": safe, "ok": True})
+            elif action == "reject":
+                rec["rejected"] = True
+                rec["approved"] = False
+                results.append({"file": safe, "ok": True})
+            else:  # delete
+                stream_folder = rec.get("stream_folder") or ""
+                drive_ok, drive_msg = drive_mod.delete_from_drive(
+                    stream_folder, safe, log=self.job.log)
+                clips = [c for c in clips if c.get("file") != safe]
+                for folder in (self.store.clips, self.store.posted):
+                    p = os.path.join(folder, safe)
+                    if os.path.exists(p):
+                        os.remove(p)
+                results.append({"file": safe, "ok": True,
+                                "drive_deleted": drive_ok,
+                                "drive_message": drive_msg})
+                self._save_manifest_for(stream_folder)
+        self.store.save_clips(clips)
+        self.job.log(f"Bulk {action}: {len([r for r in results if r['ok']])}/{len(results)} ok")
+        self._send_json({"ok": True, "results": results})
 
 
 def serve(store: Store, port: int):
@@ -1096,8 +1175,9 @@ def main():
     ap = argparse.ArgumentParser(description="Live_Clipping — YouTube live -> Shorts")
     ap.add_argument("--url", help="YouTube live / VOD link")
     ap.add_argument("--clips", type=int, default=5, help="Number of clips (default 5)")
-    ap.add_argument("--length", type=int, default=45, choices=[30, 45, 60],
-                    help="Clip length in seconds (30/45/60)")
+    ap.add_argument("--length", type=int, default=60, choices=[30, 45, 60, 90],
+                    help="Clip length in seconds (30/45/60/90). Default 60: "
+                         "a Short should be long enough to complete its story.")
     ap.add_argument("--sensitivity", default="med", choices=["low", "med", "high"])
     ap.add_argument("--quality", default="max", choices=["max", "4k", "2k", "1080p"],
                     help="Max = best available (4K if the stream has it)")

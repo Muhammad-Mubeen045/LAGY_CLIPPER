@@ -98,6 +98,33 @@ def verify_in_drive(rclone: str, stream_folder: str, filename: str,
     return False
 
 
+def delete_from_drive(stream_folder: str, filename: str,
+                       log=print) -> tuple[bool, str]:
+    """Delete one clip from Drive (rclone delete of the exact path).
+
+    Returns (ok, message). A delete in the panel must really drop the
+    clip — leaving the Drive copy behind would mean "deleted" is a
+    lie. Only the exact file in the exact stream folder is removed,
+    never a folder. Returns False with a reason when rclone is missing
+    or the delete fails, so the caller can warn the user that the
+    Drive copy is still there.
+    """
+    rclone = find_rclone()
+    if not rclone:
+        return False, "rclone not found — Drive copy NOT deleted"
+    if not stream_folder or not filename:
+        return False, "no Drive folder/file recorded — nothing to delete"
+    remote = remote_path(stream_folder, filename)
+    try:
+        res = _run_rclone(rclone, ["delete", remote], timeout=300)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return False, f"Drive delete timed out / failed: {exc}"
+    if res.returncode != 0:
+        return False, f"Drive delete failed: {(res.stderr or '').strip()[:200]}"
+    log(f"Deleted from Drive: {remote}")
+    return True, "Drive copy deleted"
+
+
 def upload_clip(local_path: str, stream_folder: str, log=print,
                 retries: int = 1) -> tuple[bool, str, str]:
     """Upload one clip and verify it in Drive.

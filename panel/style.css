@@ -67,6 +67,12 @@ select { background:#050807; border:1px solid var(--line); color:var(--text); bo
 .bar { height:100%; background:var(--green); transition:width .4s; }
 .stage { margin-top:10px; font-size:14px; color:var(--cyan); }
 .log { background:#050807; border:1px solid var(--line); border-radius:8px; padding:12px; height:170px; overflow:auto; font-size:12px; line-height:1.5; white-space:pre-wrap; }
+.review-bar { display:flex; gap:12px; flex-wrap:wrap; align-items:end; background:#050807; border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:12px; }
+.review-bar label { display:flex; flex-direction:column; gap:6px; font-size:12px; color:var(--muted); }
+.review-bar select { padding:8px; font-size:13px; }
+.review-counts { margin-left:auto; font-size:12px; color:var(--cyan); font-weight:700; }
+.review-actions { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:14px; }
+.review-actions .btn { padding:8px 16px; font-size:13px; }
 .count { color:var(--muted); font-size:13px; }
 .drive-note { background:#050807; border:1px solid var(--line); border-radius:8px; padding:10px 12px; font-size:12px; color:var(--muted); margin-bottom:14px; line-height:1.6; }
 .drive-note code, code { color:var(--cyan); }

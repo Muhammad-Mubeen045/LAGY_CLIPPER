@@ -79,9 +79,11 @@ async function markPosted(name, btn) {
   loadClips();
 }
 async function deleteClip(name, btn) {
-  if (!confirm("Delete this clip?")) return;
+  if (!confirm("Delete this clip from the panel, the laptop, AND Drive? Rejected clips stay in Drive — delete removes it everywhere.")) return;
   btn.disabled = true;
-  await api(`/api/clips/${encodeURIComponent(name)}/delete`, { method: "POST" });
+  const res = await api(`/api/clips/${encodeURIComponent(name)}/delete`, { method: "POST" });
+  if (!res.ok) { alert(res.error || "Delete failed."); btn.disabled = false; return; }
+  if (res.drive_deleted === false) alert("Clip deleted locally, but the Drive copy is still there: " + (res.drive_message || ""));
   loadClips();
 }
 async function retryUpload(name, btn) {
@@ -142,16 +144,96 @@ async function editClip(name, idx, btn) {
 }
 function copyText(t) { navigator.clipboard?.writeText(t); }
 
+// --- Review & filter (v1.5) ------------------------------------------
+// A clip "needs review" when it is neither approved, rejected nor
+// posted — that is the queue the user works through. Filters are
+// client-side over the clips the server returns.
+let allClips = [];
+function clipStatus(c) {
+  if (c.posted) return "posted";
+  if (c.approved) return "approved";
+  if (c.rejected) return "rejected";
+  return "needs";
+}
+function clipMatchesFilter(c, f) {
+  if (f.status !== "all" && clipStatus(c) !== f.status) return false;
+  if (f.type !== "all" && (c.cut_type || "SHORT") !== f.type) return false;
+  if (f.source !== "all" && (c.stream_folder || "") !== f.source) return false;
+  if (f.minScore && (c.score || 0) < f.minScore) return false;
+  return true;
+}
+function currentFilter() {
+  return {
+    status: $("fStatus").value,
+    type: $("fType").value,
+    source: $("fSource").value,
+    minScore: +$("fScore").value,
+  };
+}
+function visibleClips() {
+  const f = currentFilter();
+  return allClips.filter((c) => clipMatchesFilter(c, f));
+}
+async function bulkAction(action, files, confirmMsg) {
+  if (!files.length) { alert("No clips shown by the current filters."); return; }
+  if (confirmMsg && !confirm(confirmMsg)) return;
+  const res = await api("/api/clips/bulk", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, files }),
+  });
+  if (!res.ok) { alert(res.error || "Bulk action failed."); return; }
+  const failed = (res.results || []).filter((r) => !r.ok);
+  if (failed.length) alert(`${failed.length} clip(s) failed: ` + failed.map((r) => r.file).join(", "));
+  loadClips();
+}
+async function bulkApproveShown(btn) {
+  const files = visibleClips().map((c) => c.file);
+  btn.disabled = true;
+  await bulkAction("approve", files, `Approve ${files.length} clip(s) shown by the filters?`);
+  btn.disabled = false;
+}
+async function bulkDeleteRejected(btn) {
+  const files = allClips.filter((c) => c.rejected).map((c) => c.file);
+  btn.disabled = true;
+  await bulkAction("delete", files, `Delete ${files.length} rejected clip(s) from the panel, laptop, AND Drive? This cannot be undone.`);
+  btn.disabled = false;
+}
+["fStatus", "fType", "fSource", "fScore"].forEach((id) => {
+  $(id).addEventListener("change", renderClips);
+});
+$("bulkApproveBtn").onclick = function () { bulkApproveShown(this); };
+$("bulkDeleteRejectedBtn").onclick = function () { bulkDeleteRejected(this); };
+
 async function loadClips() {
   const res = await api("/api/clips");
-  const clips = res.clips || [];
-  $("clipCount").textContent = clips.length ? `(${clips.length})` : "";
+  allClips = res.clips || [];
+  renderClips();
+}
+function renderClips() {
+  const clips = allClips;
+  const counts = { needs: 0, approved: 0, rejected: 0, posted: 0 };
+  clips.forEach((c) => { counts[clipStatus(c)] += 1; });
+  $("reviewCounts").textContent =
+    `${counts.needs} need review · ${counts.approved} approved · ${counts.rejected} rejected · ${counts.posted} posted`;
+  // Source dropdown: one entry per stream folder, keep the selection.
+  const srcSel = $("fSource");
+  const prev = srcSel.value;
+  const sources = [...new Set(clips.map((c) => c.stream_folder || "").filter(Boolean))].sort();
+  srcSel.innerHTML = '<option value="all">All sources</option>' +
+    sources.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("");
+  srcSel.value = sources.includes(prev) ? prev : "all";
+  const shown = visibleClips();
+  $("clipCount").textContent = clips.length ? `(${shown.length} of ${clips.length})` : "";
   const box = $("clips");
   if (!clips.length) {
     box.innerHTML = '<p class="muted">No clips yet. Process a stream and they will appear here with previews.</p>';
     return;
   }
-  box.innerHTML = clips.map((c, idx) => {
+  if (!shown.length) {
+    box.innerHTML = '<p class="muted">No clips match the current filters. Try “All clips” or clear the score filter.</p>';
+    return;
+  }
+  box.innerHTML = shown.map((c, idx) => {
     const ds = c.drive_status || "pending";
     const badge = ds === "uploaded"
       ? `<span class="drive-badge up">✓ Drive uploaded</span>`

@@ -1,14 +1,23 @@
-"""Moment detection: real audio-energy analysis, no fake scores.
+"""Moment detection: audio + visual signals, no fake scores.
 
 Pipeline:
   1. ffmpeg extracts a 16 kHz mono WAV from the source.
   2. RMS energy is computed in 1-second windows (numpy if available,
      otherwise ffmpeg astats per-second output as a fallback).
-  3. Windows above a sensitivity percentile that are local maxima are
-     candidate peaks. Peaks within 15 s are merged (keeps the loudest).
-  4. Optional subtitle keyword boost: windows whose subtitle text
+  3. Visual signals are sampled too: shot boundaries (fast ffmpeg
+     scene detection) and face presence (YuNet, one frame every 5 s).
+     Audio alone misses the quiet moments people love — a romantic
+     scene or a kiss is a sustained close-up face, not a loud peak —
+     so the score combines audio + face + shot change.
+  4. Windows above a sensitivity percentile of the combined score
+     that are local maxima are candidate peaks. Peaks within 15 s
+     are merged (keeps the highest).
+  5. Optional subtitle keyword boost: windows whose subtitle text
      contains a hype word get +10 score (capped at 100).
-  5. Top N moments are returned, each centred on its peak.
+  6. Top N moments are returned, each with a story-complete window:
+     the clip edges align to shot boundaries and never cut a subtitle
+     line in half, so the Short tells its whole beat — best moves and
+     full dialogue — instead of a mid-shot fragment.
 """
 from __future__ import annotations
 
@@ -26,6 +35,153 @@ KEYWORDS = [
 
 SENSITIVITY = {"low": 90, "med": 80, "high": 65}
 MERGE_SECONDS = 15
+
+# Combined moment score weights. Audio still leads, but a quiet
+# close-up face scene can now beat a merely loud one — that is the
+# point: a romantic scene or a kiss is a sustained close-up, not a
+# loud peak. When there is no visual signal at all, the weights
+# reduce to audio-only ranking (0.45 * audio, same order).
+W_AUDIO = 0.45
+W_FACE = 0.35
+W_SHOT = 0.20
+# A face counts as a close-up when it covers this much of the width.
+FACE_CLOSEUP_W = 0.25
+# How far around a window to look for a face sample / shot change.
+FACE_WINDOW_S = 6.0
+SHOT_WINDOW_S = 2.0
+
+
+def detect_shot_changes(video_path: str, log=print) -> list[float]:
+    """Shot boundaries via ffmpeg scene detection (one fast pass).
+
+    Returns sorted shot-change timestamps in seconds. A new shot is
+    a new beat — a moment should start near one, not mid-shot.
+    """
+    cmd = ["ffmpeg", "-v", "info", "-i", video_path,
+           "-vf", "select='gt(scene,0.35)',showinfo",
+           "-f", "null", "-"]
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    times: list[float] = []
+    for line in (res.stderr or "").splitlines():
+        if "showinfo" not in line:
+            continue
+        m = re.search(r"pts_time:([\d.]+)", line)
+        if m:
+            times.append(float(m.group(1)))
+    times = sorted(set(round(t, 2) for t in times))
+    log(f"Shot changes: {len(times)} detected.")
+    return times
+
+
+def parse_subtitle_segments(vtt_path: str | None) -> list[dict]:
+    """Return [{start, end, text}] dialogue lines from a .vtt file."""
+    segs: list[dict] = []
+    if not vtt_path or not os.path.exists(vtt_path):
+        return segs
+    time_re = re.compile(
+        r"(\d+):(\d+):(\d+)\.(\d+)\s+-->\s+(\d+):(\d+):(\d+)\.(\d+)")
+
+    def _to_s(h: str, mi: str, s: str, ms: str) -> float:
+        return int(h) * 3600 + int(mi) * 60 + int(s) + int(ms) / 1000.0
+
+    cur: dict | None = None
+    with open(vtt_path, encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            m = time_re.search(line)
+            if m:
+                g = m.groups()
+                cur = {"start": _to_s(*g[:4]), "end": _to_s(*g[4:]),
+                       "text": ""}
+                segs.append(cur)
+                continue
+            if cur is not None and line and not line.isdigit():
+                cur["text"] += (" " + line) if cur["text"] else line
+    return [s for s in segs if s["text"]]
+
+
+def _face_score(second: float, face_samples: list[dict]) -> tuple[float, str]:
+    """Visual face score for one second of video.
+
+    Sustained face presence wins: a close-up held across samples is
+    the romantic/kiss case. A single brief face flash scores low.
+    Returns (score 0..1, label).
+    """
+    if not face_samples:
+        return 0.0, ""
+    nearby = [s for s in face_samples
+              if abs(s["t"] - second) <= FACE_WINDOW_S and s["faces"] > 0]
+    if not nearby:
+        return 0.0, ""
+    max_w = max(s["max_w"] for s in nearby)
+    if len(nearby) >= 2 and max_w >= FACE_CLOSEUP_W:
+        return 1.0, "close-up face"
+    if len(nearby) >= 2:
+        return 0.6, "faces on screen"
+    if max_w >= FACE_CLOSEUP_W:
+        return 0.4, "brief close-up"
+    return 0.0, ""
+
+
+def _shot_score(second: float, shot_changes: list[float]) -> float:
+    """1.0 when a shot starts near this second, else 0.0."""
+    if not shot_changes:
+        return 0.0
+    return 1.0 if any(abs(t - second) <= SHOT_WINDOW_S
+                      for t in shot_changes) else 0.0
+
+
+def expand_to_story(start: int, end: int, peak: int, clip_length: int,
+                    duration: float,
+                    shot_changes: list[float] | None = None,
+                    subtitle_segments: list[dict] | None = None,
+                    log=print) -> tuple[int, int]:
+    """Stretch a moment window so the Short tells its whole beat.
+
+    1. Edges align to shot boundaries (within 8 s) so the clip does
+       not start or end mid-shot.
+    2. Edges never cut a subtitle line in half (within 5 s) so the
+       dialogue is complete.
+    The window stays within [0, duration] and within
+    [clip_length - 5, clip_length + 10] seconds long — a Short stays
+    a Short; a story that needs more than the cap belongs in a VIDEO.
+    """
+    new_start, new_end = start, end
+    shot_changes = shot_changes or []
+    subtitle_segments = subtitle_segments or []
+
+    # Shot boundaries: latest change at/before the start, earliest
+    # change at/after the end, each within 8 s.
+    before = [t for t in shot_changes if t <= start]
+    if before and start - before[-1] <= 8:
+        new_start = int(before[-1])
+    after = [t for t in shot_changes if t >= end]
+    if after and after[0] - end <= 8:
+        new_end = int(round(after[0]))
+
+    # Dialogue: a line overlapping an edge moves the edge to the
+    # line's start/end, so no line is cut in half.
+    for seg in subtitle_segments:
+        if seg["start"] <= new_start < seg["end"]:
+            if new_start - seg["start"] <= 5:
+                new_start = int(seg["start"])
+        if seg["start"] < new_end <= seg["end"]:
+            if seg["end"] - new_end <= 5:
+                new_end = int(round(seg["end"]))
+
+    new_start = max(0, new_start)
+    new_end = min(int(duration), new_end)
+    # Keep the length near the intended clip length; if the shifts
+    # stretched it too far, fall back to the centred window.
+    if not (clip_length - 5 <= new_end - new_start <= clip_length + 10):
+        log(f"Story window @{peak}s kept centred "
+            f"(shot/dialogue shift would make it "
+            f"{new_end - new_start}s vs {clip_length}s).")
+        return start, end
+    if (new_start, new_end) != (start, end):
+        log(f"Story window @{peak}s: {start}-{end}s -> "
+            f"{new_start}-{new_end}s (shot/dialogue aligned).")
+    return new_start, new_end
 
 
 def extract_audio(video_path: str, wav_path: str, log=print) -> str:
@@ -119,58 +275,113 @@ def parse_subtitle_keywords(vtt_path: str | None) -> dict[int, list[str]]:
 def find_moments(energies: list[float], duration: float, clip_length: int,
                  count: int, sensitivity: str = "med",
                  subtitle_hits: dict[int, list[str]] | None = None,
+                 shot_changes: list[float] | None = None,
+                 face_samples: list[dict] | None = None,
+                 subtitle_segments: list[dict] | None = None,
                  log=print) -> list[dict]:
-    """Rank moments by audio energy. Returns list of moment dicts."""
+    """Rank moments by audio + visual signals. Returns moment dicts.
+
+    Combined score per second = 0.45*audio + 0.35*face + 0.20*shot.
+    A quiet close-up face scene (romantic, kiss) can now outrank a
+    merely loud moment; with no visual signal the ranking is
+    audio-only, as before. Each moment's window is then expanded to
+    a story-complete beat (shot boundaries + full dialogue lines).
+    """
     if not energies:
         raise RuntimeError("No audio energy data — cannot detect moments.")
-    pct = SENSITIVITY.get(sensitivity, 80)
-    threshold = _percentile(energies, pct)
     max_e = max(energies) or 1.0
-    log(f"Energy: {len(energies)} windows, max={max_e:.4f}, "
-        f"threshold p{pct}={threshold:.4f}")
+    shot_changes = shot_changes or []
+    face_samples = face_samples or []
+
+    # Combined score per 1-second window.
+    combined: list[float] = []
+    for i, e in enumerate(energies):
+        audio = e / max_e
+        face, _ = _face_score(float(i), face_samples)
+        shot = _shot_score(float(i), shot_changes)
+        combined.append(W_AUDIO * audio + W_FACE * face + W_SHOT * shot)
+
+    pct = SENSITIVITY.get(sensitivity, 80)
+    threshold = _percentile(combined, pct)
+    max_c = max(combined) or 1.0
+    log(f"Combined scores: {len(combined)} windows, max={max_c:.3f}, "
+        f"threshold p{pct}={threshold:.3f} "
+        f"(audio + face + shot; {len(face_samples)} face samples, "
+        f"{len(shot_changes)} shot changes)")
 
     # Candidate peaks: local maxima above threshold.
     candidates: list[tuple[int, float]] = []
-    for i, e in enumerate(energies):
-        if e < threshold:
+    for i, c in enumerate(combined):
+        if c < threshold:
             continue
-        neighbours = energies[max(0, i - 2):i + 3]
-        if e >= max(neighbours):
-            candidates.append((i, e))
-    if not candidates:  # very flat audio: fall back to global maxima
-        top_idx = sorted(range(len(energies)), key=lambda i: energies[i], reverse=True)
-        candidates = [(i, energies[i]) for i in top_idx[: count * 3]]
-        log("Audio is very flat — using global energy maxima as moments.")
+        neighbours = combined[max(0, i - 2):i + 3]
+        if c >= max(neighbours):
+            candidates.append((i, c))
+    if not candidates:  # very flat scores: fall back to global maxima
+        top_idx = sorted(range(len(combined)), key=lambda i: combined[i], reverse=True)
+        candidates = [(i, combined[i]) for i in top_idx[: count * 3]]
+        log("Combined scores are very flat — using global maxima as moments.")
 
-    # Merge candidates within MERGE_SECONDS, keep loudest in each group.
-    merged: list[tuple[int, float]] = []
-    for i, e in sorted(candidates):
-        if merged and i - merged[-1][0] <= MERGE_SECONDS:
-            if e > merged[-1][1]:
-                merged[-1] = (i, e)
-        else:
-            merged.append((i, e))
+    # Greedy top-N selection: take the highest-scoring peaks first,
+    # each at least min_sep away from every peak already taken. A
+    # fixed time-window merge chained distinct beats together (a 20 s
+    # window collapsed a trailer's 25 s-apart beats into 3 moments);
+    # greedy selection picks the best distinct beats and cannot chain.
+    # min_sep scales with the clip length: two peaks closer than a
+    # third of a clip are one beat, not two.
+    min_sep = max(MERGE_SECONDS, clip_length // 3)
+    ranked = sorted(candidates, key=lambda p: p[1], reverse=True)
+    selected: list[tuple[int, float]] = []
+    for peak, c in ranked:
+        if all(abs(peak - p) >= min_sep for p, _ in selected):
+            selected.append((peak, c))
+        if len(selected) >= count * 3:
+            break
+    if not selected:
+        selected = ranked[:count]
+    merged = selected
 
     subtitle_hits = subtitle_hits or {}
+    subtitle_segments = subtitle_segments or []
     scored: list[dict] = []
-    for peak, e in merged:
-        score = round(100.0 * e / max_e, 1)
+    for peak, c in merged:
+        score = round(100.0 * c / max_c, 1)
         start = int(max(0, min(peak - clip_length // 2,
                                max(0, duration - clip_length))))
+        end = start + clip_length
+        # What drove this moment — the panel shows it as the reason.
+        signals: list[str] = []
+        audio = energies[peak] / max_e
+        if audio >= 0.7:
+            signals.append("loud peak")
+        face, face_label = _face_score(float(peak), face_samples)
+        if face > 0:
+            signals.append(face_label)
+        if _shot_score(float(peak), shot_changes):
+            signals.append("new shot")
         # Keyword boost: any hype word spoken anywhere inside the clip
         # window (not just at the exact peak second) counts.
         kws: list[str] = []
-        for sec in range(start, start + clip_length):
+        for sec in range(start, end):
             kws.extend(subtitle_hits.get(sec, []))
         kws = sorted(set(kws))
         if kws:
             score = min(100.0, score + 10.0)
+            signals.append("keyword: " + ", ".join(kws))
+        # Story-complete window: shot boundaries + full dialogue.
+        start, end = expand_to_story(
+            start, end, peak, clip_length, duration,
+            shot_changes=shot_changes, subtitle_segments=subtitle_segments,
+            log=log)
         scored.append({
             "peak_time": peak,
             "start": start,
-            "end": start + clip_length,
+            "end": end,
+            "length": end - start,
             "score": score,
-            "energy": round(e, 4),
+            "energy": round(energies[peak], 4),
+            "combined": round(c, 3),
+            "signals": signals,
             "keywords": kws,
         })
     scored.sort(key=lambda m: m["score"], reverse=True)
@@ -180,7 +391,8 @@ def find_moments(energies: list[float], duration: float, clip_length: int,
         m["rank"] = rank
     top.sort(key=lambda m: m["start"])
     log(f"Top {len(top)} moments: " +
-        ", ".join(f"#{m['rank']} @{m['start']}s score={m['score']}" for m in top))
+        ", ".join(f"#{m['rank']} @{m['start']}s score={m['score']} "
+                  f"({', '.join(m['signals']) or 'audio'})" for m in top))
     return top
 
 
@@ -206,7 +418,9 @@ def classify_short(moment: dict) -> tuple[str, list[str]]:
     """Every peak moment is a SHORT by construction. Returns (type, reasons)."""
     reasons = [f"single strong peak at {fmt_timestamp(moment['start'])}",
                f"score {moment['score']}"]
-    if moment.get("keywords"):
+    if moment.get("signals"):
+        reasons.append("signals: " + ", ".join(moment["signals"]))
+    elif moment.get("keywords"):
         reasons.append("keyword: " + ", ".join(moment["keywords"]))
     return "SHORT", reasons
 

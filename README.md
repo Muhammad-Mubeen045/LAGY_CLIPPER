@@ -1,4 +1,4 @@
-# Live_Clipping 🎬 — v1.3
+# Live_Clipping 🎬 — v1.5
 
 Turn a YouTube live stream (or any public YouTube video) into vertical
 **Shorts-ready clips** — automatically finding the loudest, most hype
@@ -221,6 +221,52 @@ pyinstaller build_pyinstaller.spec
 - Clip audio is quiet → loudnorm is applied; check the source stream volume.
 - Panel shows old clips → clips are listed from `clips.json` in your data dir;
   delete from the panel to remove the file too.
+
+## v1.5 — Review & Filter: keep or drop, before you post (2026-11-18)
+The panel had approve/reject/delete buttons buried inside each
+clip card, but no review section and no way to filter — with clips
+from every job mixed together, the user could not see what still
+needed a decision. v1.5 adds a proper review hub:
+
+- **Filter bar** (section 3, "Review — keep or drop"): status
+  (Needs review / All / Approved / Rejected / Posted), type (SHORT /
+  VIDEO), source video (one entry per stream folder), min score
+  (Any / 90+ / 80+ / 70+). "Needs review" is the default — clips
+  that are neither approved, rejected nor posted.
+- **Counts** — "X need review · Y approved · Z rejected · W posted",
+  always visible, plus "(N of M)" on the section heading.
+- **Bulk actions** — "Approve all shown" (approves every clip the
+  filters currently show) and "Delete all rejected". Both go through
+  one new `/api/clips/bulk` endpoint that returns per-file results.
+- **Delete really deletes** — it now removes the Drive copy too
+  (`rclone delete` of the exact file), not just the local record.
+  Reject stays soft: the clip is marked not-worthy but stays in
+  Drive as a backup. Nothing is posted from the panel — approving
+  only marks a clip worthy; posting is a separate step.
+
+## v1.4 — visual moments + story-complete Shorts (2026-11-17)
+Two fixes to how moments are picked and how long a Short is.
+
+**Moments are no longer audio-only.** The old picker ranked clips by
+loudness alone, so it missed the quiet moments people love — a
+romantic scene or a kiss is a sustained close-up face, not a loud
+peak. The score is now `0.45*audio + 0.35*face + 0.20*shot` per
+second: shot boundaries (fast ffmpeg scene detection) mark a new
+beat, and face presence (YuNet, one frame every 5 s) scores a
+sustained close-up at 1.0, sustained faces at 0.6, a brief close-up
+at 0.4. A quiet close-up scene can now outrank a merely loud moment;
+with no visual signal the ranking is audio-only, as before. The
+panel shows *why* a moment was picked (loud peak / close-up face /
+new shot / keyword).
+
+**Shorts now complete their story.** Default length is 60 s (was
+45 s; 90 s is now an option too), and each clip window is expanded
+to a story-complete beat: its edges align to shot boundaries (within
+8 s) and never cut a subtitle line in half (within 5 s), so the
+Short holds the setup, the best moves, and the full dialogue instead
+of a mid-shot fragment. The window stays within 5 s short / 10 s
+over the chosen length — a Short stays a Short; a story that needs
+more than the cap belongs in a VIDEO (long-form).
 
 ## v1.3 — face-centred framing, default for all videos (2026-11-17)
 A 9:16 vertical crop only keeps the middle third of a 16:9 frame, so a
