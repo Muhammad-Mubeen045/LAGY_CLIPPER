@@ -361,23 +361,31 @@ def cut_horizontal(src: str, start: int, length: int, out_path: str, log=print,
     """Cut a VIDEO segment: horizontal 16:9, NO crop — the full frame
     (gameplay + facecam) is kept. Length 2–10 min. CRF 16, AAC 192k.
     v1.8.6: at least 2K (2560x1440) on MAX, upscaled + enhanced when
-    the source is lower."""
+    the source is lower.
+    v1.8.11: full enhanced on every 2K cut, native or upscaled."""
     global last_cut_info
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     src_w, src_h = source_dimensions(src)
     tw, th = horizontal_target(src_h, quality)
     upscaled = bool(src_h and src_h < th)
-    vf = (f"scale={tw}:{th}:force_original_aspect_ratio=decrease,"
-          f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30")
-    if upscaled:
+    # User rule v1.8.11: full enhanced minimum 2K. The enhancement
+    # chain (lanczos + deblock + denoise + unsharp + eq) applies to
+    # every 2K horizontal cut, not only to upscales -- a native 1440p
+    # source still gets sharpened and cleaned. The `upscaled` LABEL
+    # stays honest: it only fires when the source is below the target.
+    enhanced = th >= 1440
+    if enhanced:
         vf = (f"scale={tw}:{th}:force_original_aspect_ratio=decrease:"
               f"flags=lanczos,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,"
               f"deblock=block=8:alpha=0.12:beta=0.12,"
               f"hqdn3d=3:2:4:3,unsharp=5:5:0.7:5:5:0.0,"
               f"eq=contrast=1.08:saturation=1.15,setsar=1,fps=30")
+    else:
+        vf = (f"scale={tw}:{th}:force_original_aspect_ratio=decrease,"
+              f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30")
     last_cut_info = {"source_height": src_h, "source_width": src_w,
                      "target_width": tw, "target_height": th,
-                     "upscaled": upscaled,
+                     "upscaled": upscaled, "enhanced": enhanced,
                      "upscaled_from": src_h if upscaled else None,
                      "focus": "full-frame", "facecam_corner": "",
                      "crop_anchor": "full-frame", "nudge_x": 0, "nudge_y": 0,

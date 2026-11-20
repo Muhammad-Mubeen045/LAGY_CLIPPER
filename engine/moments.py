@@ -52,8 +52,8 @@ MERGE_SECONDS = 15
 # and motion are still signals, but they no longer lead. Dialogue is
 # the strongest single signal: what people say is what viewers
 # remember, quote and share.
-W_AUDIO = 0.15
-W_FACE = 0.10
+W_AUDIO = 0.10
+W_FACE = 0.05
 W_SHOT = 0.05
 W_MOTION = 0.10
 W_TRANSIENT = 0.05
@@ -62,6 +62,7 @@ W_DIALOGUE = 0.20
 W_CONTRAST = 0.15
 W_ARC = 0.10
 W_REACTION = 0.05
+W_INTIMATE = 0.10
 # A face counts as a close-up when it covers this much of the width.
 FACE_CLOSEUP_W = 0.25
 # How far around a window to look for a face sample / shot change.
@@ -228,6 +229,27 @@ def _quiet_face_score(second: float, audio_norm: float,
         return 0.0
     max_w = max(s["max_w"] for s in nearby)
     if len(nearby) >= 2 and max_w >= FACE_CLOSEUP_W:
+        return 1.0
+    return 0.0
+
+
+def _intimate_score(second: float, audio_norm: float,
+                    face_samples: list[dict]) -> float:
+    """Two faces close in a quiet moment: the romance/adult case.
+
+    An intimate scene (bed, kiss, close two-person moment) is quiet
+    audio with TWO faces held on screen together -- two people close,
+    not one face alone. Returns 1.0 when the audio is low and two or
+    more faces are present across sustained samples, else 0.0.
+    """
+    if audio_norm >= 0.30 or not face_samples:
+        return 0.0
+    nearby = [s for s in face_samples
+              if abs(s["t"] - second) <= FACE_WINDOW_S and s["faces"] > 0]
+    if not nearby:
+        return 0.0
+    max_faces = max(s["faces"] for s in nearby)
+    if len(nearby) >= 2 and max_faces >= 2:
         return 1.0
     return 0.0
 
@@ -462,16 +484,18 @@ def find_moments(energies: list[float], duration: float, clip_length: int,
                  log=print) -> list[dict]:
     """Rank moments by audio + visual + motion signals. Returns moment dicts.
 
-    Combined score per second = 0.15*audio + 0.10*face + 0.05*shot
+    Combined score per second = 0.10*audio + 0.05*face + 0.05*shot
     + 0.10*motion + 0.05*transient + 0.05*quiet-face + 0.20*dialogue
-    + 0.15*contrast + 0.10*arc + 0.05*reaction. It thinks like a
+    + 0.15*contrast + 0.10*arc + 0.05*reaction + 0.10*intimate.
+    It thinks like a
     human watching, not a meter: what is SAID (dialogue) matters
     most, then surprise (quiet, then a burst) and build-up (a scene
     rising to a payoff). A quiet close-up (romance/kiss), a
     high-motion stretch (car drifting/action) or a sharp onset
     (gunshot) can still win. Selection is type-diverse: the best
     moment of each signal type (loud, motion, gunshot, romance,
-    face, shot, dialogue, surprise, arc, reaction) is taken first,
+    adult, face, shot, dialogue, surprise, arc, reaction) is taken
+    first,
     so one chunk returns a mix of kinds instead of five loud peaks.
     Each moment's window is then expanded to a story-complete beat.
     """
@@ -497,11 +521,13 @@ def find_moments(energies: list[float], duration: float, clip_length: int,
         contrast = _contrast_score(i, energies, max_e)
         arc = _arc_score(i, energies, max_e)
         reaction = _reaction_score(float(i), face_samples)
+        intimate = _intimate_score(float(i), audio, face_samples)
         combined.append(W_AUDIO * audio + W_FACE * face + W_SHOT * shot
                         + W_MOTION * motion + W_TRANSIENT * transient
                         + W_QUIET_FACE * quiet_face
                         + W_DIALOGUE * dialogue + W_CONTRAST * contrast
-                        + W_ARC * arc + W_REACTION * reaction)
+                        + W_ARC * arc + W_REACTION * reaction
+                        + W_INTIMATE * intimate)
         # Dominant type for diversity: the strongest WEIGHTED
         # contribution wins, so the type is what actually drove the
         # score -- dialogue, surprise, arc, reaction included.
@@ -512,7 +538,8 @@ def find_moments(energies: list[float], duration: float, clip_length: int,
                  ("dialogue", W_DIALOGUE * dialogue),
                  ("surprise", W_CONTRAST * contrast),
                  ("arc", W_ARC * arc),
-                 ("reaction", W_REACTION * reaction)]
+                 ("reaction", W_REACTION * reaction),
+                 ("adult", W_INTIMATE * intimate)]
         types.append(max(parts, key=lambda p: p[1])[0])
 
     pct = SENSITIVITY.get(sensitivity, 80)
@@ -521,7 +548,7 @@ def find_moments(energies: list[float], duration: float, clip_length: int,
     log(f"Combined scores: {len(combined)} windows, max={max_c:.3f}, "
         f"threshold p{pct}={threshold:.3f} "
         f"(audio + face + shot + motion + transient + quiet-face "
-        f"+ dialogue + surprise + arc + reaction; "
+        f"+ dialogue + surprise + arc + reaction + intimate; "
         f"{len(face_samples)} face samples, "
         f"{len(shot_changes)} shot changes, "
         f"{len(subtitle_segments)} subtitle lines)")
@@ -540,7 +567,8 @@ def find_moments(energies: list[float], duration: float, clip_length: int,
         log("Combined scores are very flat — using global maxima as moments.")
 
     # Type-diverse selection: take the best peak of each signal type
-    # first (loud, motion, gunshot, romance, face, shot), then fill
+    # first (loud, motion, gunshot, romance, adult, face, shot),
+    # then fill
     # the remaining slots with the highest scorers. This is what makes
     # one chunk return a mix of kinds instead of five loud peaks.
     # min_sep scales with the clip length: two peaks closer than a
@@ -596,6 +624,8 @@ def find_moments(energies: list[float], duration: float, clip_length: int,
             signals.append("sharp onset (gunshot/impact)")
         if _quiet_face_score(float(peak), audio, face_samples) > 0:
             signals.append("quiet close-up (romance/kiss)")
+        if _intimate_score(float(peak), audio, face_samples) > 0:
+            signals.append("two faces close (romance/adult)")
         if _dialogue_score(float(peak), subtitle_segments) >= 0.5:
             signals.append("dialogue (people talking)")
         if _contrast_score(peak, energies, max_e) >= 0.5:

@@ -248,6 +248,8 @@ def main():
         quality_label = (
             f"upscaled from {cut_info['upscaled_from']}p"
             if cut_info["upscaled"] else f"native {cut_info['source_height']}p")
+        if cut_info.get("enhanced"):
+            quality_label += " + enhanced"
         rec = {
             "id": fname, "file": fname,
             "title": pkg["title"], "description": pkg["description"],

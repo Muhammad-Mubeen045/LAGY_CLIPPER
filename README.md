@@ -222,22 +222,22 @@ pyinstaller build_pyinstaller.spec
 - Panel shows old clips → clips are listed from `clips.json` in your data dir;
   delete from the panel to remove the file too.
 
-## v1.8.11 — Human-psyche moment selection (2026-11-19)
-
-The cutter now thinks like a human watching, not a meter. New signals in
-`engine/moments.py` (`find_moments`): **dialogue** (subtitle word density —
-what people SAY is what viewers remember, quote and share; weight 0.20, the
-strongest single signal), **surprise** (quiet, then a burst — jumpscares,
-reveals, punchlines landing; 0.15), **build-up / arc** (energy rising into a
-peak — a scene building to a payoff; 0.10) and **reaction** (a face appearing
-where there was none; 0.05). Loudness drops to 0.15, face to 0.10. The
-type-diverse pick now covers loud, motion, gunshot, romance, face, shot,
-dialogue, surprise, arc and reaction, so one chunk returns a mix of kinds
-instead of five loud peaks. `fullframe_cut.py` fetches English auto-subtitles
-(best-effort, never breaks the download) and passes them to the scorer, so
-story-complete windows also use real dialogue lines. Also in this push:
-`fullframe_cut.py` itself (standalone full-frame VOD chunk cutter, 2K VP9,
-range-specific section files) is now part of the repo.
+## v1.8.11 — Human-psyche moment selection + full enhanced 2K (2026-11-19)
+- **Moments picked like a human, not a meter:** the old weights were
+  mostly loudness + face, so the same loud clips came out again and
+  again and quiet moments (romance, kiss, jokes, build-up) were missed.
+  New weights: dialogue 0.20, contrast (surprise) 0.15, loudness 0.10,
+  story arc 0.10, motion 0.10, intimate (romance/adult) 0.10, face 0.05,
+  shot 0.05, transient 0.05, quiet-face 0.05, reaction 0.05.
+  Intimate means two faces close in a quiet moment (bed, kiss, close
+  two-person scene). fullframe_cut.py fetches English
+  auto-subtitles so dialogue is a real signal; the panel live path
+  has no subtitles yet, so dialogue is 0 there.
+- **Full enhanced minimum 2K:** every 2K horizontal cut now gets the
+  full enhancement chain (lanczos + deblock + denoise + unsharp +
+  contrast/saturation), native or upscaled. A source below 2K is
+  upscaled to 2560x1440 with the same treatment. The "upscaled"
+  label stays honest: it only fires when the source is below target.
 
 ## v1.8.10 — Approve/Reject answer instantly (2026-11-18)
 - **Approve looked broken:** the record WAS marked approved, but the
