@@ -207,9 +207,23 @@ async function bulkDeleteRejected(btn) {
 $("bulkApproveBtn").onclick = function () { bulkApproveShown(this); };
 $("bulkDeleteRejectedBtn").onclick = function () { bulkDeleteRejected(this); };
 
+let lastClipsSig = "";
 async function loadClips() {
   const res = await api("/api/clips");
-  allClips = res.clips || [];
+  const next = res.clips || [];
+  // v1.8.2 — do NOT rebuild the clip cards when nothing changed.
+  // renderClips() sets box.innerHTML, which destroys and recreates
+  // every <video> element — so a clip the user is watching restarted
+  // from 0 every ~5s when the poll re-loaded the list. Only re-render
+  // when a clip was added/removed or its review/drive state changed.
+  const sig = JSON.stringify(next.map((c) => [
+    c.file, c.approved, c.rejected, c.posted, c.drive_status,
+    c.title, c.cut_type, c.score, c.stream_folder,
+    c.full_frame_drive_status || "",
+  ]));
+  allClips = next;
+  if (sig === lastClipsSig) return;
+  lastClipsSig = sig;
   renderClips();
 }
 function renderClips() {
@@ -227,7 +241,7 @@ function renderClips() {
   srcSel.value = sources.includes(prev) ? prev : "all";
   const shown = visibleClips();
   $("clipCount").textContent = clips.length ? `(${shown.length} of ${clips.length})` : "";
-  const box = $("clips");
+  const box = $("clipsBox");
   if (!clips.length) {
     box.innerHTML = '<p class="muted">No clips yet. Process a stream and they will appear here with previews.</p>';
     return;
@@ -263,15 +277,15 @@ function renderClips() {
         <div class="framing">
           <b>Framing</b> — focus: ${esc(c.focus || "gameplay")}${c.focus === "facecam" ? " (" + esc(c.facecam_corner || "") + ")" : ""}${c.focus === "face" && c.framing ? " (" + esc(c.framing.source) + " " + esc(c.framing.anchor_x) + ", conf " + esc(c.framing.confidence) + ")" : ""} · nudge (${esc(c.nudge_x || 0)}, ${esc(c.nudge_y || 0)})
           <div class="clip-actions">
-            <button class="btn ghost" onclick="reframeClip(${JSON.stringify(c.file)}, {nudge_dx:-100}, this)">← Left</button>
-            <button class="btn ghost" onclick="reframeClip(${JSON.stringify(c.file)}, {nudge_dx:100}, this)">Right →</button>
-            <button class="btn ghost" onclick="reframeClip(${JSON.stringify(c.file)}, {nudge_dy:-100}, this)">↑ Up</button>
-            <button class="btn ghost" onclick="reframeClip(${JSON.stringify(c.file)}, {nudge_dy:100}, this)">↓ Down</button>
+            <button class="btn ghost" onclick='reframeClip(${JSON.stringify(c.file)}, {nudge_dx:-100}, this)'>← Left</button>
+            <button class="btn ghost" onclick='reframeClip(${JSON.stringify(c.file)}, {nudge_dx:100}, this)'>Right →</button>
+            <button class="btn ghost" onclick='reframeClip(${JSON.stringify(c.file)}, {nudge_dy:-100}, this)'>↑ Up</button>
+            <button class="btn ghost" onclick='reframeClip(${JSON.stringify(c.file)}, {nudge_dy:100}, this)'>↓ Down</button>
           </div>
           <div class="clip-actions">
-            <button class="btn ghost" onclick="reframeClip(${JSON.stringify(c.file)}, {focus:'gameplay'}, this)">🎮 Gameplay focus (centre)</button>
-            <button class="btn ghost" onclick="reframeClip(${JSON.stringify(c.file)}, {focus:'face'}, this)">🙂 Face focus (auto-detect)</button>
-            <button class="btn ghost" onclick="reframeClip(${JSON.stringify(c.file)}, {focus:'facecam', facecam_corner: document.getElementById('fc-${idx}').value}, this)">📷 Facecam focus</button>
+            <button class="btn ghost" onclick='reframeClip(${JSON.stringify(c.file)}, {focus:'gameplay'}, this)'>🎮 Gameplay focus (centre)</button>
+            <button class="btn ghost" onclick='reframeClip(${JSON.stringify(c.file)}, {focus:'face'}, this)'>🙂 Face focus (auto-detect)</button>
+            <button class="btn ghost" onclick='reframeClip(${JSON.stringify(c.file)}, {focus:'facecam', facecam_corner: document.getElementById('fc-${idx}').value}, this)'>📷 Facecam focus</button>
             <select id="fc-${idx}"><option value="top-right">facecam top-right</option><option value="top-left">facecam top-left</option><option value="bottom-right">facecam bottom-right</option><option value="bottom-left">facecam bottom-left</option></select>
           </div>
         </div>` : `<div class="framing"><b>Framing</b> — full-frame 16:9, no crop (gameplay + facecam kept).</div>`;
@@ -288,14 +302,15 @@ function renderClips() {
           ${c.rejected ? '<span class="rejected-badge">✗ REJECTED</span>' : ""}
           <br>${badge} ${freed}
           ${c.stream_folder ? `<br><span class="muted">Drive: 07-cuts-sequence/${esc(c.stream_folder)}/</span>` : ""}
+          ${c.full_frame_file ? `<br><span class="muted">Full frame: ${esc(c.full_frame_file)} → 07-cuts-sequence/${esc(c.full_frame_folder || (c.stream_folder + "_FULL"))}/ ${c.full_frame_drive_status === "uploaded" ? "✓ Drive uploaded" : c.full_frame_drive_status === "failed" ? "✗ Drive failed" : "… pending"}</span>` : ""}
         </div>
         ${frame}
         <div class="clip-actions">
           ${dl}
-          <button class="btn ghost" onclick="copyText(${JSON.stringify(c.title + "\n\n" + c.description)})">Copy title + description</button>
-          ${ds === "failed" ? `<button class="btn warn" onclick="retryUpload(${JSON.stringify(c.file)}, this)">↻ Retry Drive upload</button>` : ""}
-          ${c.posted ? "" : `<button class="btn warn" onclick="markPosted(${JSON.stringify(c.file)}, this)">Mark as Posted</button>`}
-          <button class="btn danger" onclick="deleteClip(${JSON.stringify(c.file)}, this)">Delete</button>
+          <button class="btn ghost" onclick='copyText(${JSON.stringify(c.title + "\n\n" + c.description)})'>Copy title + description</button>
+          ${ds === "failed" ? `<button class="btn warn" onclick='retryUpload(${JSON.stringify(c.file)}, this)'>↻ Retry Drive upload</button>` : ""}
+          ${c.posted ? "" : `<button class="btn warn" onclick='markPosted(${JSON.stringify(c.file)}, this)'>Mark as Posted</button>`}
+          <button class="btn danger" onclick='deleteClip(${JSON.stringify(c.file)}, this)'>Delete</button>
         </div>
         <div class="edit-box">
           <b>Review &amp; edit</b>
@@ -305,10 +320,10 @@ function renderClips() {
           <input id="h-${idx}" value="${esc((c.hashtags || []).join(" "))}" placeholder="Hashtags (space separated)">
           <div class="trim-row">Trim (seconds in source): start <input id="s-${idx}" type="number" min="0" value="${esc(c.start)}"> end <input id="e-${idx}" type="number" min="0" value="${esc(c.end)}"> <span class="muted">5–60s · needs the source still on the laptop</span></div>
           <div class="clip-actions">
-            <button class="btn ghost" onclick="editClip(${JSON.stringify(c.file)}, ${idx}, this)">Save edits / apply trim</button>
-            ${c.approved ? "" : `<button class="btn" onclick="approveClip(${JSON.stringify(c.file)}, this)">✓ Approve for upload</button>`}
-            ${c.rejected ? "" : `<button class="btn warn" onclick="rejectClip(${JSON.stringify(c.file)}, this)">✗ Reject</button>`}
-            <button class="btn ghost" onclick="changeTypeClip(${JSON.stringify(c.file)}, ${JSON.stringify(otherType)}, this)">⇄ Make it ${otherType}</button>
+            <button class="btn ghost" onclick='editClip(${JSON.stringify(c.file)}, ${idx}, this)'>Save edits / apply trim</button>
+            ${c.approved ? "" : `<button class="btn" onclick='approveClip(${JSON.stringify(c.file)}, this)'>✓ Approve for upload</button>`}
+            ${c.rejected ? "" : `<button class="btn warn" onclick='rejectClip(${JSON.stringify(c.file)}, this)'>✗ Reject</button>`}
+            <button class="btn ghost" onclick='changeTypeClip(${JSON.stringify(c.file)}, ${JSON.stringify(otherType)}, this)'>⇄ Make it ${otherType}</button>
           </div>
         </div>
         ${framing}

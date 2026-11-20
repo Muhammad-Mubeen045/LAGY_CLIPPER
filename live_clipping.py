@@ -55,7 +55,7 @@ def _safe_int(value, default: int) -> int:
         return default
 
 
-VERSION = "1.7.0"
+VERSION = "1.8.11"
 DEFAULT_PORT = 8899
 RIGHTS_NOTE = (
     "Only clip streams you own or have permission for, or that are "
@@ -80,6 +80,14 @@ class Store:
         self.state_file = os.path.join(self.base, "state.json")
         self.clips_file = os.path.join(self.base, "clips.json")
         self.log_file = os.path.join(self.logs, "live_clipping.log")
+        # Lock serialising every clips.json read-modify-write (panel
+        # approve/reject/delete/bulk AND the job's final save). Without
+        # it, two requests that load the same list and save back
+        # clobber each other's change — e.g. deleting two clips at
+        # once restored one of them, and a reject made mid-job was
+        # undone by the job's save. Every clips.json write goes
+        # through this lock (see update_clips / merge_save_clips).
+        self.clips_lock = threading.Lock()
         # Shared live status: EVERY job (panel, CLI, rerun script) writes
         # here on every stage change, so a browser refresh always shows
         # the live work — never a stale in-memory state.
@@ -97,6 +105,43 @@ class Store:
     def save_clips(self, clips: list) -> None:
         with open(self.clips_file, "w", encoding="utf-8") as f:
             json.dump(clips, f, indent=2, ensure_ascii=False)
+
+    def update_clips(self, fn):
+        """Atomically load clips.json, apply fn(clips), save it back.
+
+        Holds the clips lock for the whole read-modify-write, so two
+        panel requests (or a request and the job's save) cannot load
+        the same stale list and clobber each other. fn receives the
+        list and may mutate it in place; its return value is returned.
+        """
+        with self.clips_lock:
+            clips = self.load_clips()
+            result = fn(clips)
+            self.save_clips(clips)
+            return result
+
+    def merge_save_clips(self, new_records: list) -> list:
+        """Atomically merge a job's new records into clips.json.
+
+        Re-reads clips.json from disk (so approve/reject/delete
+        decisions the user made while the job was running are kept),
+        keeps the on-disk version of every record that already exists
+        there, drops records the user deleted, and appends only the
+        new records that are not already on disk. Returns the merged
+        list. This replaces the old `existing.extend(made); save`
+        which overwrote the file with a stale in-memory copy and
+        undid the user's mid-job decisions.
+        """
+        with self.clips_lock:
+            on_disk = self.load_clips()
+            on_disk_files = {c.get("file") for c in on_disk}
+            merged = list(on_disk)
+            for rec in new_records:
+                if rec.get("file") not in on_disk_files:
+                    merged.append(rec)
+                    on_disk_files.add(rec.get("file"))
+            self.save_clips(merged)
+            return merged
 
 
 # ---------------------------------------------------------------- job state
@@ -226,8 +271,18 @@ def slug_channel(name: str) -> str:
 
 
 def _upload_and_free(job: Job, out: str, rec: dict, free_space: bool) -> float:
-    """Upload one cut to Drive in sequence and, once verified, free the
-    laptop copy. Returns MB freed (0 when the file is kept)."""
+    """Upload one cut to Drive in sequence.
+
+    v1.8.4: the local copy is ALWAYS kept now, so the panel's video
+    player can play the clip while the user reviews it. (Freeing it
+    after upload meant /api/clip-file 404'd and the panel showed only
+    a still preview image — the user could not watch the clip to
+    decide approve/reject.) Local copies are removed only when the
+    user deletes the clip in the panel (Drive + local). The
+    `free_space` flag is kept for API compatibility but no longer
+    deletes clip files; the big source recording is still freed by
+    `delete_source` after the job. Returns MB freed (always 0 now).
+    """
     ok, drive_path, err = drive_mod.upload_clip(
         out, rec["stream_folder"], log=job.log)
     rec["drive_path"] = drive_path
@@ -239,19 +294,56 @@ def _upload_and_free(job: Job, out: str, rec: dict, free_space: bool) -> float:
         return 0.0
     rec["drive_status"] = "uploaded"
     rec["uploaded_at"] = datetime.now().isoformat()
-    if not free_space:
-        return 0.0
+    rec["local_freed"] = False
+    job.log(f"Clip uploaded to Drive and kept locally for panel viewing: "
+            f"{rec['file']}")
+    return 0.0
+
+
+def _cut_and_upload_full_frame(job: Job, src: str, rec: dict, start: int,
+                               length: int, quality: str,
+                               free_space: bool) -> float:
+    """v1.8 — two folders per video. Every SHORT also gets a full-frame
+    (horizontal, no crop — the video's default cut) twin, uploaded to
+    the sibling Drive folder `<stream_folder>_FULL`. The record keeps
+    `full_frame_file` / `full_frame_drive_*` so the panel can show it.
+    Returns MB freed (0 when the file is kept or the cut failed)."""
+    folder = (rec.get("stream_folder") or "") + "_FULL"
+    base = rec["file"]
+    ff_name = base[:-4] + "_FULL.mp4" if base.endswith(".mp4") else base + "_FULL"
+    # NOTE: `store` is a local inside run_job, not a module global —
+    # the clips dir lives on the job (job.store.clips). Using bare
+    # `store` here raised NameError and killed the whole job.
+    out = os.path.join(job.store.clips, ff_name)
     try:
-        freed = os.path.getsize(out) / 1e6
-        os.remove(out)
-        rec["local_freed"] = True
-        rec["freed_mb"] = round(freed, 2)
-        job.log(f"Freed laptop space: {rec['file']} deleted locally "
-                f"({freed:.1f} MB) — clip lives in Drive now.")
-        return freed
-    except OSError as exc:
-        job.log(f"WARNING: could not delete local clip {rec['file']}: {exc}")
+        clip_mod.cut_horizontal(src, start, length, out,
+                                log=job.log, quality=quality)
+    except Exception as exc:  # noqa: BLE001
+        job.log(f"WARNING: full-frame cut failed for {rec['file']}: {exc}")
+        rec["full_frame_file"] = ff_name
+        rec["full_frame_folder"] = folder
+        rec["full_frame_drive_status"] = "failed"
+        rec["full_frame_drive_error"] = str(exc)[:200]
         return 0.0
+    rec["full_frame_file"] = ff_name
+    rec["full_frame_folder"] = folder
+    ok, drive_path, err = drive_mod.upload_clip(out, folder, log=job.log)
+    rec["full_frame_drive_path"] = drive_path
+    if not ok:
+        rec["full_frame_drive_status"] = "failed"
+        rec["full_frame_drive_error"] = err
+        job.log(f"Full-frame Drive upload FAILED for {ff_name}: {err} "
+                f"— kept locally, retry from the panel.")
+        return 0.0
+    rec["full_frame_drive_status"] = "uploaded"
+    rec["full_frame_uploaded_at"] = datetime.now().isoformat()
+    job.log(f"Full-frame cut uploaded: {ff_name} -> "
+            f"07-cuts-sequence/{folder}/")
+    # v1.8.4: keep the local full-frame copy too, so the panel can
+    # play it (same reason as _upload_and_free — freeing it after
+    # upload left the panel with no video to show).
+    rec["full_frame_local_freed"] = False
+    return 0.0
 
 
 def run_job(job: Job, url: str, num_clips: int = 5, clip_length: int = 60,
@@ -426,6 +518,13 @@ def run_job(job: Job, url: str, num_clips: int = 5, clip_length: int = 60,
                 "stream_folder": stream_folder,
                 "drive_status": "pending", "drive_path": "", "uploaded_at": "",
                 "local_freed": False, "freed_mb": 0.0,
+                # v1.8: full-frame twin (horizontal, no crop) of this
+                # SHORT, in the sibling <stream_folder>_FULL Drive
+                # folder. Set by _cut_and_upload_full_frame.
+                "full_frame_file": "", "full_frame_folder": "",
+                "full_frame_drive_status": "pending",
+                "full_frame_drive_path": "", "full_frame_uploaded_at": "",
+                "full_frame_local_freed": False, "full_frame_freed_mb": 0.0,
                 # Review step: approval is recorded here and in the Drive
                 # manifest. It does NOT publish anything by itself.
                 "approved": False, "approved_at": "", "rejected": False,
@@ -440,6 +539,12 @@ def run_job(job: Job, url: str, num_clips: int = 5, clip_length: int = 60,
             job.log(f"Clip {i}: {fname} ({check['duration']}s, {check['size_mb']} MB, "
                     f"score {m['score']}, {rec['resolution']} {quality_label}, "
                     f"type={cut_type})")
+
+            # --- v1.8: full-frame twin for this Short (same moment,
+            # horizontal, no crop) into the sibling _FULL Drive folder.
+            if cut_type == "SHORT":
+                freed_mb_total += _cut_and_upload_full_frame(
+                    job, src, rec, m["start"], m_len, quality, free_space)
 
             # --- v1.1: upload THIS clip to Drive in sequence, right now,
             # before cutting the next one. Only then free the laptop copy.
@@ -510,8 +615,12 @@ def run_job(job: Job, url: str, num_clips: int = 5, clip_length: int = 60,
             job.set(message=f"Uploading VIDEO {j}/{len(sustained)} to Drive…")
             freed_mb_total += _upload_and_free(job, out, rec, free_space)
 
-        existing.extend(made)
-        store.save_clips(existing)
+        # Merge (not overwrite): the user may have approved / rejected /
+        # deleted clips while this job was running. merge_save_clips
+        # re-reads clips.json from disk, keeps the on-disk version of
+        # every record (the user's latest decision), drops records the
+        # user deleted, and only appends this job's new records.
+        existing = store.merge_save_clips(made)
         # Manifest in Drive from the start, so review/approve state is
         # readable from Drive (Buzz uploads approved clips later).
         _ok, _err = drive_mod.upload_manifest(
@@ -669,6 +778,18 @@ class Handler(BaseHTTPRequestHandler):
                     if os.path.exists(full):
                         self._send_video(full)
                         return
+                # v1.8.4: the local copy was freed after upload — fetch
+                # it back from Drive on demand so the clip can still be
+                # watched in the panel (cached locally afterwards).
+                rec = next((c for c in self.store.load_clips()
+                            if c.get("file") == safe), None)
+                if rec and rec.get("drive_status") == "uploaded":
+                    ok, dest = drive_mod.download_clip(
+                        rec.get("stream_folder") or "", safe,
+                        self.store.clips, log=self.job.log)
+                    if ok and os.path.exists(dest):
+                        self._send_video(dest)
+                        return
                 self.send_error(404, "Clip not found")
             elif path == "/api/preview":
                 qs = parse_qs(parsed.query)
@@ -700,6 +821,9 @@ class Handler(BaseHTTPRequestHandler):
                 end = int(end) if end else size - 1
             except ValueError:
                 start, end = 0, size - 1
+            # Clamp the range to the file (a browser may ask past EOF).
+            start = max(0, min(start, size - 1))
+            end = max(start, min(end, size - 1))
             length = end - start + 1
             self.send_response(206)
             self.send_header("Content-Type", "video/mp4")
@@ -707,9 +831,22 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(length))
             self.send_header("Accept-Ranges", "bytes")
             self.end_headers()
+            # NOTE: shutil.copyfileobj(f, w, length) does NOT copy only
+            # `length` bytes — its 3rd arg is the BUFFER size, so it
+            # copied the whole rest of the file while the header promised
+            # only the range. The browser got extra bytes, the next
+            # range request on the keep-alive connection read garbage,
+            # and playback stalled after 1–2s. Copy exactly `length`
+            # bytes instead.
             with open(full, "rb") as f:
                 f.seek(start)
-                shutil.copyfileobj(f, self.wfile, length)
+                remaining = length
+                while remaining > 0:
+                    chunk = f.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
             return
         self.send_response(200)
         self.send_header("Content-Type", "video/mp4")
@@ -844,26 +981,48 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": err})
 
     def _save_manifest_for(self, stream_folder: str):
-        """Re-upload the Drive manifest for one stream folder (best effort)."""
+        """Re-upload the Drive manifest for one stream folder (best effort).
+
+        Runs in a background daemon thread (v1.8.10): the manifest upload
+        to Drive can take 10+ seconds (slow/rate-limited), and Approve /
+        Reject used to block on it BEFORE answering, so the panel showed
+        no feedback and Approve looked broken even though the record WAS
+        marked approved. Now the API answers immediately and the manifest
+        uploads behind it.
+        """
         if not stream_folder:
             return
-        clips = [c for c in self.store.load_clips()
-                 if c.get("stream_folder") == stream_folder]
-        ok, err = drive_mod.upload_manifest(stream_folder, clips, log=self.job.log)
-        if not ok:
-            self.job.log(f"Manifest upload skipped/failed for {stream_folder}: {err}")
+
+        def _upload():
+            try:
+                clips = [c for c in self.store.load_clips()
+                         if c.get("stream_folder") == stream_folder]
+                ok, err = drive_mod.upload_manifest(stream_folder, clips, log=self.job.log)
+                if not ok:
+                    self.job.log(f"Manifest upload skipped/failed for {stream_folder}: {err}")
+            except Exception:
+                self.job.log(f"Manifest upload error for {stream_folder} (ignored).")
+                traceback.print_exc()
+
+        threading.Thread(target=_upload, daemon=True).start()
 
     def _approve_clip(self, name: str):
         safe = os.path.basename(name)
-        clips = self.store.load_clips()
-        rec = next((c for c in clips if c.get("file") == safe), None)
+        # Atomic read-modify-write under the clips lock (see Store):
+        # two concurrent requests must not load the same list and
+        # clobber each other's change.
+        def _do(clips):
+            rec = next((c for c in clips if c.get("file") == safe), None)
+            if not rec:
+                return None
+            rec["approved"] = True
+            rec["approved_at"] = datetime.now().isoformat()
+            rec["rejected"] = False
+            return rec
+        rec = self.store.update_clips(_do)
         if not rec:
             self._send_json({"ok": False, "error": "Clip not found."})
             return
-        rec["approved"] = True
-        rec["approved_at"] = datetime.now().isoformat()
-        rec["rejected"] = False
-        self.store.save_clips(clips)
         self.job.log(f"Approved for upload: {safe} (recorded in clips.json + Drive manifest)")
         self._save_manifest_for(rec.get("stream_folder") or "")
         self._send_json({"ok": True, "approved_at": rec["approved_at"]})
@@ -976,15 +1135,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def _reject_clip(self, name: str):
         safe = os.path.basename(name)
-        clips = self.store.load_clips()
-        rec = next((c for c in clips if c.get("file") == safe), None)
+        # Atomic read-modify-write under the clips lock (see Store).
+        def _do(clips):
+            rec = next((c for c in clips if c.get("file") == safe), None)
+            if not rec:
+                return None
+            rec["rejected"] = True
+            rec["approved"] = False
+            rec["approved_at"] = ""
+            return rec
+        rec = self.store.update_clips(_do)
         if not rec:
             self._send_json({"ok": False, "error": "Clip not found."})
             return
-        rec["rejected"] = True
-        rec["approved"] = False
-        rec["approved_at"] = ""
-        self.store.save_clips(clips)
         self.job.log(f"Rejected (not worthy): {safe}")
         self._save_manifest_for(rec.get("stream_folder") or "")
         self._send_json({"ok": True})
@@ -1128,15 +1291,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def _delete_clip(self, name: str):
         safe = os.path.basename(name)
-        clips = self.store.load_clips()
-        rec = next((c for c in clips if c.get("file") == safe), None)
-        stream_folder = (rec or {}).get("stream_folder") or ""
         # Delete the Drive copy FIRST, so a failed Drive delete is
         # reported instead of silently leaving the clip in Drive.
+        # The record removal itself is an atomic read-modify-write
+        # under the clips lock, so a concurrent request (or the job's
+        # save) cannot restore the record after we remove it.
+        clips_now = self.store.load_clips()
+        rec_now = next((c for c in clips_now if c.get("file") == safe), None)
+        stream_folder = (rec_now or {}).get("stream_folder") or ""
         drive_ok, drive_msg = drive_mod.delete_from_drive(
             stream_folder, safe, log=self.job.log)
-        clips = [c for c in clips if c.get("file") != safe]
-        self.store.save_clips(clips)
+        def _do(clips):
+            clips[:] = [c for c in clips if c.get("file") != safe]
+        self.store.update_clips(_do)
         for folder in (self.store.clips, self.store.posted):
             p = os.path.join(folder, safe)
             if os.path.exists(p):
@@ -1162,28 +1329,32 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "No clips given."})
             return
         results: list[dict] = []
-        clips = self.store.load_clips()
+        # Drive deletes are slow (network) — do them OUTSIDE the lock,
+        # then apply all record changes in ONE atomic update_clips so
+        # a concurrent request cannot clobber them.
+        to_remove: set[str] = set()
+        to_flag: dict[str, dict] = {}
+        clips_now = self.store.load_clips()
         for name in files:
             safe = os.path.basename(str(name))
-            rec = next((c for c in clips if c.get("file") == safe), None)
+            rec = next((c for c in clips_now if c.get("file") == safe), None)
             if not rec:
                 results.append({"file": safe, "ok": False,
                                 "error": "Clip not found."})
                 continue
             if action == "approve":
-                rec["approved"] = True
-                rec["approved_at"] = datetime.now().isoformat()
-                rec["rejected"] = False
+                to_flag[safe] = {"approved": True,
+                                 "approved_at": datetime.now().isoformat(),
+                                 "rejected": False}
                 results.append({"file": safe, "ok": True})
             elif action == "reject":
-                rec["rejected"] = True
-                rec["approved"] = False
+                to_flag[safe] = {"rejected": True, "approved": False}
                 results.append({"file": safe, "ok": True})
             else:  # delete
                 stream_folder = rec.get("stream_folder") or ""
                 drive_ok, drive_msg = drive_mod.delete_from_drive(
                     stream_folder, safe, log=self.job.log)
-                clips = [c for c in clips if c.get("file") != safe]
+                to_remove.add(safe)
                 for folder in (self.store.clips, self.store.posted):
                     p = os.path.join(folder, safe)
                     if os.path.exists(p):
@@ -1192,7 +1363,15 @@ class Handler(BaseHTTPRequestHandler):
                                 "drive_deleted": drive_ok,
                                 "drive_message": drive_msg})
                 self._save_manifest_for(stream_folder)
-        self.store.save_clips(clips)
+        def _do(clips):
+            if to_remove:
+                clips[:] = [c for c in clips
+                            if c.get("file") not in to_remove]
+            for c in clips:
+                flag = to_flag.get(c.get("file") or "")
+                if flag:
+                    c.update(flag)
+        self.store.update_clips(_do)
         self.job.log(f"Bulk {action}: {len([r for r in results if r['ok']])}/{len(results)} ok")
         self._send_json({"ok": True, "results": results})
 

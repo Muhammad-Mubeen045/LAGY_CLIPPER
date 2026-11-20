@@ -1,20 +1,27 @@
-"""Moment detection: audio + visual signals, no fake scores.
+"""Moment detection: audio + visual + motion signals, no fake scores.
 
 Pipeline:
   1. ffmpeg extracts a 16 kHz mono WAV from the source.
   2. RMS energy is computed in 1-second windows (numpy if available,
      otherwise ffmpeg astats per-second output as a fallback).
   3. Visual signals are sampled too: shot boundaries (fast ffmpeg
-     scene detection) and face presence (YuNet, one frame every 5 s).
-     Audio alone misses the quiet moments people love — a romantic
-     scene or a kiss is a sustained close-up face, not a loud peak —
-     so the score combines audio + face + shot change.
+     scene detection), face presence (YuNet, one frame every 5 s),
+     and motion energy (OpenCV frame difference at 2 fps — car
+     drifting and action are motion, not loud audio). Audio alone
+     misses the quiet moments people love — a romantic scene or a
+     kiss is a sustained close-up face, not a loud peak — so the
+     score combines audio + face + shot + motion + sharp onsets
+     (gunshots) + quiet close-up faces (romance/kiss).
   4. Windows above a sensitivity percentile of the combined score
      that are local maxima are candidate peaks. Peaks within 15 s
      are merged (keeps the highest).
   5. Optional subtitle keyword boost: windows whose subtitle text
      contains a hype word get +10 score (capped at 100).
-  6. Top N moments are returned, each with a story-complete window:
+  6. Selection is type-diverse: the best moment of each signal type
+     (loud, motion, gunshot, romance, face, shot, dialogue,
+     surprise, arc, reaction) is taken first, so one chunk returns
+     a mix of kinds instead of five loud peaks.
+  7. Top N moments are returned, each with a story-complete window:
      the clip edges align to shot boundaries and never cut a subtitle
      line in half, so the Short tells its whole beat — best moves and
      full dialogue — instead of a mid-shot fragment.
@@ -36,19 +43,80 @@ KEYWORDS = [
 SENSITIVITY = {"low": 90, "med": 80, "high": 65}
 MERGE_SECONDS = 15
 
-# Combined moment score weights. Audio still leads, but a quiet
-# close-up face scene can now beat a merely loud one — that is the
-# point: a romantic scene or a kiss is a sustained close-up, not a
-# loud peak. When there is no visual signal at all, the weights
-# reduce to audio-only ranking (0.45 * audio, same order).
-W_AUDIO = 0.45
-W_FACE = 0.35
-W_SHOT = 0.20
+# Combined moment score weights -- human psyche first. A human does
+# not pick a moment because it is loud. They pick it because
+# something is SAID (dialogue -- a joke, a reaction, a story beat),
+# because it SURPRISES them (quiet, then a burst), because it BUILDS
+# to a payoff (tension rising into a peak), or because someone
+# REACTS (a face appearing where there was none). Loudness, faces
+# and motion are still signals, but they no longer lead. Dialogue is
+# the strongest single signal: what people say is what viewers
+# remember, quote and share.
+W_AUDIO = 0.15
+W_FACE = 0.10
+W_SHOT = 0.05
+W_MOTION = 0.10
+W_TRANSIENT = 0.05
+W_QUIET_FACE = 0.05
+W_DIALOGUE = 0.20
+W_CONTRAST = 0.15
+W_ARC = 0.10
+W_REACTION = 0.05
 # A face counts as a close-up when it covers this much of the width.
 FACE_CLOSEUP_W = 0.25
 # How far around a window to look for a face sample / shot change.
 FACE_WINDOW_S = 6.0
 SHOT_WINDOW_S = 2.0
+
+
+def compute_motion_energies(video_path: str, duration: float,
+                            log=print) -> list[float]:
+    """Per-second motion energy: mean frame difference at low fps.
+
+    Car drifting, chases and big action are high sustained motion,
+    not loud audio. Sample at 2 fps, downscaled to 320x180, and
+    measure the mean absolute difference between consecutive frames.
+    Returns one value per second (0..1, normalised to the max).
+    Falls back to zeros if OpenCV is missing.
+    """
+    try:
+        import cv2  # noqa: PLC0415
+        import numpy as np  # noqa: PLC0415
+    except Exception as exc:
+        log(f"Motion sampling skipped (no cv2/numpy: {exc}) — motion=0.")
+        return [0.0] * max(1, int(duration))
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        log("Motion sampling skipped (cannot open video) — motion=0.")
+        return [0.0] * max(1, int(duration))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    step = max(1, int(round(fps / 2.0)))  # 2 fps
+    per_sec: dict[int, list[float]] = {}
+    prev: object = None
+    idx = 0
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        if idx % step == 0:
+            small = cv2.resize(frame, (320, 180))
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            if prev is not None:
+                diff = float(np.mean(np.abs(gray - prev)))
+                sec = int(idx / fps)
+                per_sec.setdefault(sec, []).append(diff)
+            prev = gray
+        idx += 1
+    cap.release()
+    n = max(1, int(duration))
+    out = [0.0] * n
+    for sec, vals in per_sec.items():
+        if 0 <= sec < n:
+            out[sec] = sum(vals) / len(vals)
+    mx = max(out) or 1.0
+    out = [v / mx for v in out]
+    log(f"Motion energies: {len(out)} windows, max normalised to 1.0.")
+    return out
 
 
 def detect_shot_changes(video_path: str, log=print) -> list[float]:
@@ -129,6 +197,118 @@ def _shot_score(second: float, shot_changes: list[float]) -> float:
         return 0.0
     return 1.0 if any(abs(t - second) <= SHOT_WINDOW_S
                       for t in shot_changes) else 0.0
+
+
+def _transient_score(second: int, energies: list[float], max_e: float) -> float:
+    """Sharp audio onset: a sudden jump from the previous second.
+
+    Gunshots and impacts are short, sharp bursts — a big jump in
+    energy, not a sustained loud level. Normalised 0..1.
+    """
+    if second <= 0 or second >= len(energies) or max_e <= 0:
+        return 0.0
+    jump = energies[second] - energies[second - 1]
+    return max(0.0, min(1.0, jump / max_e))
+
+
+def _quiet_face_score(second: float, audio_norm: float,
+                      face_samples: list[dict]) -> float:
+    """Quiet close-up face: the romance/kiss case.
+
+    A love scene or kiss is quiet audio with a sustained close-up
+    face held on screen — the opposite of a loud peak. Returns 1.0
+    when the audio is low and a close-up face is held across
+    samples, else 0.0.
+    """
+    if audio_norm >= 0.30 or not face_samples:
+        return 0.0
+    nearby = [s for s in face_samples
+              if abs(s["t"] - second) <= FACE_WINDOW_S and s["faces"] > 0]
+    if not nearby:
+        return 0.0
+    max_w = max(s["max_w"] for s in nearby)
+    if len(nearby) >= 2 and max_w >= FACE_CLOSEUP_W:
+        return 1.0
+    return 0.0
+
+
+def _dialogue_score(second: float, subtitle_segments: list[dict]) -> float:
+    """How much dialogue is spoken around this second.
+
+    A human picks moments for what people SAY -- a joke, a reaction,
+    a story beat. Count the subtitle words overlapping a 10 s window
+    centred on this second. Dense dialogue (~40 words per 10 s) is
+    1.0. Returns 0.0 when no subtitles are available, so the signal
+    simply stays off instead of breaking the run.
+    """
+    if not subtitle_segments:
+        return 0.0
+    lo, hi = second - 5.0, second + 5.0
+    words = 0
+    for seg in subtitle_segments:
+        if seg["end"] > lo and seg["start"] < hi:
+            words += len(seg["text"].split())
+    return min(1.0, words / 40.0)
+
+
+def _contrast_score(second: int, energies: list[float], max_e: float) -> float:
+    """Surprise: quiet before, loud now.
+
+    A jumpscare, a reveal, a punchline landing -- a human notices the
+    CHANGE, not the level. Mean energy in the 3 s from this second
+    minus mean energy in the 10 s before it, normalised. Returns
+    0..1 (0 when the before-window is already loud).
+    """
+    if second < 10 or second >= len(energies) or max_e <= 0:
+        return 0.0
+    before = energies[max(0, second - 10):second]
+    after = energies[second:min(len(energies), second + 3)]
+    if not before or not after:
+        return 0.0
+    jump = (sum(after) / len(after)) - (sum(before) / len(before))
+    return max(0.0, min(1.0, jump / max_e))
+
+
+def _arc_score(second: int, energies: list[float], max_e: float) -> float:
+    """Build-up: energy rising into this peak.
+
+    A scene that builds -- a chase getting closer, an argument heating
+    up, tension rising -- then pays off is a story beat, not a random
+    spike. Compare the smoothed energy right at this second with the
+    smoothed energy 15 s earlier. Returns 0..1.
+    """
+    if second < 15 or second >= len(energies) or max_e <= 0:
+        return 0.0
+
+    def _mean(a: int, b: int) -> float:
+        vals = energies[max(0, a):min(len(energies), b)]
+        return sum(vals) / len(vals) if vals else 0.0
+
+    now = _mean(second - 1, second + 2)
+    before = _mean(second - 16, second - 13)
+    return max(0.0, min(1.0, (now - before) / max_e))
+
+
+def _reaction_score(second: float, face_samples: list[dict]) -> float:
+    """A face reacting: faces appear after being absent.
+
+    A human notices when someone turns to camera, laughs, or reacts
+    -- a face that was NOT there a moment ago. Returns 1.0 when no
+    face was sampled in the 9 s before but a face is present now,
+    else 0.0. On a stream with a permanent facecam this stays 0,
+    which is correct: a face that never leaves is not a reaction.
+    """
+    if not face_samples:
+        return 0.0
+    now = [s for s in face_samples
+           if abs(s["t"] - second) <= 3 and s["faces"] > 0]
+    if not now:
+        return 0.0
+    before = [s for s in face_samples
+              if second - 9 <= s["t"] < second - 3 and s["faces"] > 0]
+    if before:
+        return 0.0
+    return 1.0
 
 
 def expand_to_story(start: int, end: int, peak: int, clip_length: int,
@@ -278,36 +458,73 @@ def find_moments(energies: list[float], duration: float, clip_length: int,
                  shot_changes: list[float] | None = None,
                  face_samples: list[dict] | None = None,
                  subtitle_segments: list[dict] | None = None,
+                 motion_energies: list[float] | None = None,
                  log=print) -> list[dict]:
-    """Rank moments by audio + visual signals. Returns moment dicts.
+    """Rank moments by audio + visual + motion signals. Returns moment dicts.
 
-    Combined score per second = 0.45*audio + 0.35*face + 0.20*shot.
-    A quiet close-up face scene (romantic, kiss) can now outrank a
-    merely loud moment; with no visual signal the ranking is
-    audio-only, as before. Each moment's window is then expanded to
-    a story-complete beat (shot boundaries + full dialogue lines).
+    Combined score per second = 0.15*audio + 0.10*face + 0.05*shot
+    + 0.10*motion + 0.05*transient + 0.05*quiet-face + 0.20*dialogue
+    + 0.15*contrast + 0.10*arc + 0.05*reaction. It thinks like a
+    human watching, not a meter: what is SAID (dialogue) matters
+    most, then surprise (quiet, then a burst) and build-up (a scene
+    rising to a payoff). A quiet close-up (romance/kiss), a
+    high-motion stretch (car drifting/action) or a sharp onset
+    (gunshot) can still win. Selection is type-diverse: the best
+    moment of each signal type (loud, motion, gunshot, romance,
+    face, shot, dialogue, surprise, arc, reaction) is taken first,
+    so one chunk returns a mix of kinds instead of five loud peaks.
+    Each moment's window is then expanded to a story-complete beat.
     """
     if not energies:
         raise RuntimeError("No audio energy data — cannot detect moments.")
     max_e = max(energies) or 1.0
     shot_changes = shot_changes or []
     face_samples = face_samples or []
+    motion_energies = motion_energies or [0.0] * len(energies)
+    subtitle_segments = subtitle_segments or []
 
-    # Combined score per 1-second window.
+    # Combined score per 1-second window, plus each window's type.
     combined: list[float] = []
+    types: list[str] = []
     for i, e in enumerate(energies):
         audio = e / max_e
         face, _ = _face_score(float(i), face_samples)
         shot = _shot_score(float(i), shot_changes)
-        combined.append(W_AUDIO * audio + W_FACE * face + W_SHOT * shot)
+        motion = motion_energies[i] if i < len(motion_energies) else 0.0
+        transient = _transient_score(i, energies, max_e)
+        quiet_face = _quiet_face_score(float(i), audio, face_samples)
+        dialogue = _dialogue_score(float(i), subtitle_segments)
+        contrast = _contrast_score(i, energies, max_e)
+        arc = _arc_score(i, energies, max_e)
+        reaction = _reaction_score(float(i), face_samples)
+        combined.append(W_AUDIO * audio + W_FACE * face + W_SHOT * shot
+                        + W_MOTION * motion + W_TRANSIENT * transient
+                        + W_QUIET_FACE * quiet_face
+                        + W_DIALOGUE * dialogue + W_CONTRAST * contrast
+                        + W_ARC * arc + W_REACTION * reaction)
+        # Dominant type for diversity: the strongest WEIGHTED
+        # contribution wins, so the type is what actually drove the
+        # score -- dialogue, surprise, arc, reaction included.
+        parts = [("loud", W_AUDIO * audio), ("face", W_FACE * face),
+                 ("shot", W_SHOT * shot), ("motion", W_MOTION * motion),
+                 ("gunshot", W_TRANSIENT * transient),
+                 ("romance", W_QUIET_FACE * quiet_face),
+                 ("dialogue", W_DIALOGUE * dialogue),
+                 ("surprise", W_CONTRAST * contrast),
+                 ("arc", W_ARC * arc),
+                 ("reaction", W_REACTION * reaction)]
+        types.append(max(parts, key=lambda p: p[1])[0])
 
     pct = SENSITIVITY.get(sensitivity, 80)
     threshold = _percentile(combined, pct)
     max_c = max(combined) or 1.0
     log(f"Combined scores: {len(combined)} windows, max={max_c:.3f}, "
         f"threshold p{pct}={threshold:.3f} "
-        f"(audio + face + shot; {len(face_samples)} face samples, "
-        f"{len(shot_changes)} shot changes)")
+        f"(audio + face + shot + motion + transient + quiet-face "
+        f"+ dialogue + surprise + arc + reaction; "
+        f"{len(face_samples)} face samples, "
+        f"{len(shot_changes)} shot changes, "
+        f"{len(subtitle_segments)} subtitle lines)")
 
     # Candidate peaks: local maxima above threshold.
     candidates: list[tuple[int, float]] = []
@@ -322,21 +539,34 @@ def find_moments(energies: list[float], duration: float, clip_length: int,
         candidates = [(i, combined[i]) for i in top_idx[: count * 3]]
         log("Combined scores are very flat — using global maxima as moments.")
 
-    # Greedy top-N selection: take the highest-scoring peaks first,
-    # each at least min_sep away from every peak already taken. A
-    # fixed time-window merge chained distinct beats together (a 20 s
-    # window collapsed a trailer's 25 s-apart beats into 3 moments);
-    # greedy selection picks the best distinct beats and cannot chain.
+    # Type-diverse selection: take the best peak of each signal type
+    # first (loud, motion, gunshot, romance, face, shot), then fill
+    # the remaining slots with the highest scorers. This is what makes
+    # one chunk return a mix of kinds instead of five loud peaks.
     # min_sep scales with the clip length: two peaks closer than a
     # third of a clip are one beat, not two.
     min_sep = max(MERGE_SECONDS, clip_length // 3)
     ranked = sorted(candidates, key=lambda p: p[1], reverse=True)
     selected: list[tuple[int, float]] = []
+    # Pass 1: best peak of each type, in type order by best score.
+    type_best: dict[str, tuple[int, float]] = {}
     for peak, c in ranked:
+        t = types[peak] if peak < len(types) else "loud"
+        if t not in type_best:
+            type_best[t] = (peak, c)
+    for t, (peak, c) in sorted(type_best.items(),
+                               key=lambda kv: kv[1][1], reverse=True):
         if all(abs(peak - p) >= min_sep for p, _ in selected):
             selected.append((peak, c))
-        if len(selected) >= count * 3:
+        if len(selected) >= count:
             break
+    # Pass 2: fill the rest with the highest scorers.
+    if len(selected) < count * 3:
+        for peak, c in ranked:
+            if all(abs(peak - p) >= min_sep for p, _ in selected):
+                selected.append((peak, c))
+            if len(selected) >= count * 3:
+                break
     if not selected:
         selected = ranked[:count]
     merged = selected
@@ -359,6 +589,22 @@ def find_moments(energies: list[float], duration: float, clip_length: int,
             signals.append(face_label)
         if _shot_score(float(peak), shot_changes):
             signals.append("new shot")
+        motion = motion_energies[peak] if peak < len(motion_energies) else 0.0
+        if motion >= 0.7:
+            signals.append("high motion (car/action)")
+        if _transient_score(peak, energies, max_e) >= 0.5:
+            signals.append("sharp onset (gunshot/impact)")
+        if _quiet_face_score(float(peak), audio, face_samples) > 0:
+            signals.append("quiet close-up (romance/kiss)")
+        if _dialogue_score(float(peak), subtitle_segments) >= 0.5:
+            signals.append("dialogue (people talking)")
+        if _contrast_score(peak, energies, max_e) >= 0.5:
+            signals.append("surprise (quiet then burst)")
+        if _arc_score(peak, energies, max_e) >= 0.5:
+            signals.append("build-up (rising to a payoff)")
+        if _reaction_score(float(peak), face_samples) > 0:
+            signals.append("reaction (face appears)")
+        moment_type = types[peak] if peak < len(types) else "loud"
         # Keyword boost: any hype word spoken anywhere inside the clip
         # window (not just at the exact peak second) counts.
         kws: list[str] = []
@@ -373,6 +619,18 @@ def find_moments(energies: list[float], duration: float, clip_length: int,
             start, end, peak, clip_length, duration,
             shot_changes=shot_changes, subtitle_segments=subtitle_segments,
             log=log)
+        # User rule: if the moment is still going at the window end
+        # (energy stays high just past the end), the clip cuts off
+        # the main point — extend by 30 s so it completes.
+        if end < int(duration) and end < len(energies):
+            after = energies[end:min(len(energies), end + 5)]
+            if after and max(after) >= 0.5 * max_e:
+                new_end = min(int(duration), end + 30,
+                              start + clip_length + 30)
+                if new_end > end:
+                    log(f"Story window @{peak}s: extended {end}-{new_end}s "
+                        f"(action still hot past the end).")
+                    end = new_end
         scored.append({
             "peak_time": peak,
             "start": start,
@@ -383,9 +641,28 @@ def find_moments(energies: list[float], duration: float, clip_length: int,
             "combined": round(c, 3),
             "signals": signals,
             "keywords": kws,
+            "moment_type": moment_type,
         })
+    # Final selection is type-diverse too: best of each type first,
+    # then the highest scorers, so the returned moments are a mix of
+    # kinds (loud, motion, gunshot, romance, face, shot, dialogue,
+    # surprise, arc, reaction) rather than the top-N by score alone,
+    # which would be all loud peaks.
     scored.sort(key=lambda m: m["score"], reverse=True)
-    top = scored[:count]
+    top: list[dict] = []
+    seen_types: set[str] = set()
+    for m in scored:
+        if m.get("moment_type") not in seen_types:
+            top.append(m)
+            seen_types.add(m.get("moment_type"))
+        if len(top) >= count:
+            break
+    if len(top) < count:
+        for m in scored:
+            if m not in top:
+                top.append(m)
+            if len(top) >= count:
+                break
     # Present in timeline order for the panel, keep rank in the record.
     for rank, m in enumerate(top, 1):
         m["rank"] = rank

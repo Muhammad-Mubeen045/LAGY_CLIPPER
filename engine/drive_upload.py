@@ -71,6 +71,35 @@ def remote_path(stream_folder: str, filename: str) -> str:
     return f"{REMOTE}:{DRIVE_ROOT}/{stream_folder}/{filename}"
 
 
+def download_clip(stream_folder: str, filename: str, dest_dir: str,
+                  log=print) -> tuple[bool, str]:
+    """Fetch one clip back from Drive into dest_dir (rclone copy).
+
+    Used by the panel's /api/clip-file: clips whose local copy was
+    freed after upload can still be watched in the panel — the file
+    is downloaded from Drive on demand (cached locally afterwards,
+    so the next view is instant). Returns (ok, local_path_or_error).
+    """
+    rclone = find_rclone()
+    if not rclone:
+        return False, "rclone not found — cannot fetch from Drive"
+    if not stream_folder or not filename:
+        return False, "no Drive folder/file recorded — nothing to fetch"
+    remote = remote_path(stream_folder, filename)
+    dest = os.path.join(dest_dir, filename)
+    try:
+        res = _run_rclone(rclone, ["copy", remote, dest_dir], timeout=600)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return False, f"Drive download timed out / failed: {exc}"
+    if res.returncode != 0:
+        return False, (f"Drive download failed: "
+                       f"{(res.stderr or '').strip()[:200]}")
+    if not os.path.exists(dest) or os.path.getsize(dest) == 0:
+        return False, "Drive download finished but the file is missing/empty"
+    log(f"Fetched from Drive for panel viewing: {filename}")
+    return True, dest
+
+
 def verify_in_drive(rclone: str, stream_folder: str, filename: str,
                     local_size: int, log=print) -> bool:
     """Check the file exists in Drive with a matching size (rclone ls)."""

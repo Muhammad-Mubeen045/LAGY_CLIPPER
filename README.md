@@ -1,4 +1,4 @@
-# Live_Clipping 🎬 — v1.7.0
+# Live_Clipping 🎬 — v1.8.11
 
 Turn a YouTube live stream (or any public YouTube video) into vertical
 **Shorts-ready clips** — automatically finding the loudest, most hype
@@ -221,6 +221,203 @@ pyinstaller build_pyinstaller.spec
 - Clip audio is quiet → loudnorm is applied; check the source stream volume.
 - Panel shows old clips → clips are listed from `clips.json` in your data dir;
   delete from the panel to remove the file too.
+
+## v1.8.11 — Human-psyche moment selection (2026-11-19)
+
+The cutter now thinks like a human watching, not a meter. New signals in
+`engine/moments.py` (`find_moments`): **dialogue** (subtitle word density —
+what people SAY is what viewers remember, quote and share; weight 0.20, the
+strongest single signal), **surprise** (quiet, then a burst — jumpscares,
+reveals, punchlines landing; 0.15), **build-up / arc** (energy rising into a
+peak — a scene building to a payoff; 0.10) and **reaction** (a face appearing
+where there was none; 0.05). Loudness drops to 0.15, face to 0.10. The
+type-diverse pick now covers loud, motion, gunshot, romance, face, shot,
+dialogue, surprise, arc and reaction, so one chunk returns a mix of kinds
+instead of five loud peaks. `fullframe_cut.py` fetches English auto-subtitles
+(best-effort, never breaks the download) and passes them to the scorer, so
+story-complete windows also use real dialogue lines. Also in this push:
+`fullframe_cut.py` itself (standalone full-frame VOD chunk cutter, 2K VP9,
+range-specific section files) is now part of the repo.
+
+## v1.8.10 — Approve/Reject answer instantly (2026-11-18)
+- **Approve looked broken:** the record WAS marked approved, but the
+  panel showed no feedback. Root cause: Approve/Reject uploaded the
+  Drive manifest SYNCHRONOUSLY before answering, and the manifest
+  upload retries 3x on Drive errors (slow/rate-limited), so the
+  response took 10+ seconds and the browser gave up (BrokenPipe).
+  Fix: the manifest upload now runs in a background daemon thread;
+  Approve/Reject answer immediately. Verified on a test record:
+  Approve and Reject both return {"ok": true} in <1s and persist.
+
+## v1.8.9 — Zoom-out disabled so clips land (2026-11-18)
+- **No clips landing again:** the 1080p cut with the blur-fill
+  zoom-out (gblur sigma=40) still took 30+ min per 60s clip on
+  this laptop (file stuck at 11 MB after 8 min), so the panel
+  sat on "Cutting clip 1/2" and nothing landed. Fix: FACE_ZOOM_OUT
+  0.90 -> 1.0 (zoom-out off, no blur-fill). The face-centred crop
+  still keeps the face in frame; it just sits closer to the edge.
+  The cut now uses the simple single-filter path, much faster.
+
+## v1.8.8 — MAX falls back to 1080p (2026-11-18)
+- **User decision:** "2k ni ho ri to 1080 m kr lon, but not less
+  than 1080." The 2K encode was too slow to land clips live.
+  MAX now gives 1080p (1080x1920 vertical, 1920x1080
+  horizontal) for any source below 4K; a 4K source still stays
+  4K. The enhancement chain (lanczos + deblock + hqdn3d +
+  unsharp + eq, CRF 16, veryfast) still runs on the 1.78x crop
+  upscale, so 1080p stays sharp. The explicit "2k" panel
+  setting still gives 2K when picked manually. Floor: never
+  below 1080p.
+
+## v1.8.8 — MAX falls back to 1080p (2026-11-18)
+- **User decision:** "2k ni ho ri to 1080 m kr lon, but not less
+  than 1080." The 2K encode was too slow to land clips live.
+  MAX now gives 1080p (1080x1920 vertical, 1920x1080
+  horizontal) for any source below 4K; a 4K source still stays
+  4K. The enhancement chain (lanczos + deblock + hqdn3d +
+  unsharp + eq, CRF 16, veryfast) still runs on the 1.78x crop
+  upscale, so 1080p stays sharp. The explicit "2k" panel
+  setting still gives 2K when picked manually. Floor: never
+  below 1080p.
+
+## v1.8.7 — Faster 2K encode so clips actually land (2026-11-18)
+- **No clips landing:** the 2K encode (1440x2560, blur-fill
+  zoom-out + lanczos + deblock + hqdn3d + unsharp + eq, preset
+  `medium`) took ~15-20 min per 60s clip on the laptop (load
+  ~12), so the job sat on "Cutting clip 1/2" for 13+ min and the
+  loop spun through cycles 2-4 waiting on a busy panel. Fix:
+  preset `medium` -> `veryfast` (CRF stays 16, so quality holds
+  — CRF dominates the look). ~2-3x quicker per clip.
+
+## v1.8.6 — Always at least 2K, enhanced (2026-11-18)
+User requirement, explicit: "hamesha max quality chiya at least
+2k jo mrzi kro… bashak kud enhance kro" — always max quality, at
+least 2K, do whatever it takes, even enhance it.
+- **Vertical Shorts (MAX):** minimum 1440x2560 (2K). A 1080p source
+  is now upscaled + enhanced to 2K instead of staying 1080x1920.
+  4K sources stay 2160x3840. The enhancement chain (lanczos +
+  deblock + hqdn3d + unsharp + eq, CRF 16) runs on every upscale.
+  The honest "upscaled from 1080p" label is kept in the record.
+- **Horizontal full-frame / VIDEO (MAX):** minimum 2560x1440
+  (2K), same enhancement chain, CRF 16.
+
+## v1.8.5 — Sharper pixels (quality fix) + delete/reject + viewing fixes (2026-11-18)
+- **Pixels not good / not high quality:** a 16:9 source cropped to
+  9:16 always upscales the cropped content (~31% of the source
+  width stretched ~1.78x), but the old `upscaled` flag
+  (`src_w < th`) was False for a 1080p source, so the cut used the
+  default bicubic scaler with NO sharpening — soft / blocky pixels.
+  Now the enhancement chain (lanczos + deblock + hqdn3d denoise +
+  unsharp + contrast/saturation, the proven 2K sharp chain) is
+  applied whenever the crop actually upscales (factor > 1.0), and
+  CRF dropped 18 -> 16 for less compression. The honest
+  "upscaled from Xp" label is unchanged. (The Nemsk live source
+  is 1080p at only ~2.1 Mbps, so the source itself is soft — the
+  chain recovers as much sharpness as the source allows.)
+- **Delete / Reject fully fixed (v1.8.4):** two races in how
+  clips.json is written. (1) Two panel requests loading the same
+  list and saving back clobbered each other — deleting two clips
+  at once restored one. (2) `run_job` loaded clips.json at job
+  start and overwrote it at job end, undoing approve/reject/delete
+  made mid-job. Fixes: a `clips_lock` in `Store` serialises every
+  clips.json read-modify-write (`update_clips` for panel handlers,
+  `merge_save_clips` for the job's final save — re-reads disk,
+  keeps the user's latest decision, drops user-deleted records,
+  appends only new records). Merge tested in isolation.
+- **Video did not show for viewing in the panel (v1.8.4):** after
+  upload the local copy was deleted (`local_freed`), so
+  `/api/clip-file` 404'd and the card showed only a still preview.
+  Fixes: new clips keep their local copy after upload (panel video
+  player works while reviewing; local copies removed only by panel
+  Delete), and `/api/clip-file` fetches a freed clip back from
+  Drive on demand (`download_clip`) and caches it locally.
+
+## v1.8.4 — (folded into v1.8.5; see above)
+
+## v1.8.3 — Approve / Reject / Delete buttons work + full-frame NameError fix (2026-11-18)
+Two bugs, both fixed.
+- **Buttons did nothing:** every card button used
+  `onclick="FUNC(${JSON.stringify(...)}, this)"`. `JSON.stringify`
+  returns a double-quoted string, so the double quotes terminated the
+  `onclick="..."` attribute early and the browser saw a broken handler
+  (`approveClip(`) — clicking did nothing. All 15 onclick handlers
+  now use single quotes for the attribute
+  (`onclick='FUNC("file", this)'`), so the JSON double quotes are safe
+  inside. This is why the buttons never worked even though the backend
+  approve/reject endpoints returned 200 + JSON (verified by curl).
+- **Full-frame NameError killed the Nemsk job:** `_cut_and_upload_full_frame`
+  used bare `store.clips`, but `store` is only a local inside `run_job`,
+  not a module global — it raised `NameError: name 'store' is not defined`
+  on the first SHORT, failing the whole job after the vertical cut
+  (clip 1 cut fine, then the full-frame twin crashed it). Fixed to
+  `job.store.clips`. The Nemsk cycle-1 job found 2 moments and cut clip 1
+  (60s, 46.78 MB, score 100) before hitting this; no Nemsk clips landed.
+
+## v1.8.2 — Clip playback no longer restarts every ~5s (2026-11-18)
+Two playback bugs, both fixed. v1.8.1 fixed the Range byte-count bug
+(`shutil.copyfileobj` 3rd arg is a buffer size, not a byte count — the
+server sent the whole rest of the file while the header promised only
+the range, corrupting the next request and stalling playback after
+1–2s). But clips still restarted after ~3s: `poll()` runs every 2s
+and `loadClipsThrottled()` re-loads the list every 5s, and
+`renderClips()` rebuilds `box.innerHTML` — destroying and recreating
+every `<video>` element, so a clip being watched restarted from 0 on
+every poll. Fix: `loadClips()` now keeps a signature of the clips
+(file + approved/rejected/posted + drive status + title + type +
+score + folder) and only calls `renderClips()` when it changes. A
+clip now plays through uninterrupted while nothing changes; approving
+or adding a clip still re-renders.
+
+## v1.8.1 — Range requests send exactly the bytes asked for (2026-11-18)
+User reported panel clips play 1–2s then stop (thought it might be a
+net issue — it was not). Root cause: `_send_video` Range path used
+`shutil.copyfileobj(f, self.wfile, length)` — its 3rd arg is the BUFFER
+size, not a byte count, so it copied the whole rest of the file while
+the header promised only the range; the browser got extra bytes, the
+next range request on the keep-alive connection read garbage, and
+playback stalled after 1–2s. Fix: copy exactly `length` bytes in a
+1 MB chunk loop, and clamp the requested range to EOF. Verified with
+curl: two back-to-back Range requests each returned HTTP 206 with
+exactly the requested byte count.
+
+## v1.8 — Face zoom-out + two Drive folders per video (2026-11-18)
+Two user requests, one release.
+- **Face zoom-out:** a face-centred vertical crop fills the whole 9:16
+  frame, so a face that moves or sits near the crop edge (Lucia's face
+  was cut in half in 2 frames of the Ultimate Gamerz clips) gets cut.
+  Face-centred cuts now default to a 10% zoom-out (`FACE_ZOOM_OUT =
+  0.90`): the cropped frame is shrunk to 90% and centred on a blurred,
+  darkened copy of the same frame, so the edges are covered (no black
+  bars) and the face keeps a margin and stays whole. Implemented in
+  `engine/clip.py` `cut_vertical` via a `filter_complex` blur-fill
+  path (`zoom` param; pass `zoom=1.0` to disable). The zoom is recorded
+  in `last_cut_info["zoom"]`.
+- **Two Drive folders per video:** every SHORT now also gets a
+  full-frame twin — the same moment, horizontal, no crop (the video's
+  default cut) — uploaded to the sibling Drive folder
+  `<stream_folder>_FULL`, while the vertical Short goes to
+  `<stream_folder>` as before. The record carries
+  `full_frame_file` / `full_frame_folder` /
+  `full_frame_drive_status` / `full_frame_drive_path`, and the panel
+  card shows the full-frame filename, folder, and upload status.
+  VIDEO (sustained) segments are already horizontal full-frame, so
+  they get no twin. Implemented in `live_clipping.py`
+  `_cut_and_upload_full_frame`, wired into the SHORT cut loop.
+
+## v1.7.1 — Review cards actually render (duplicate id fix, 2026-11-18)
+The Review section showed the count "(11 of 11)" and "11 need review"
+but the clip cards never appeared — it kept saying "No clips yet".
+Root cause: the page had TWO elements with `id="clips"` — the
+"Number of clips" `<select>` in the settings (line 41) and the review
+`<div>` (line 124). `document.getElementById("clips")` returns the
+first match, so `renderClips` wrote the cards into the invisible
+settings select and the review div was never updated. This had been
+broken since v1.5; the count/counts were set before the card write,
+which is why the numbers looked right while the list stayed empty.
+Fix: the review container is now `id="clipsBox"` and `renderClips`
+targets it; the settings select keeps `id="clips"`. Verified with a
+node test against the real clips.json (13 cards render, incl. both
+FACE re-cuts with Approve buttons; the settings select is untouched).
 
 ## v1.7 — Advanced progress details (2026-11-18)
 The panel showed only a progress bar, one status line and a log
